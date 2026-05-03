@@ -33,7 +33,8 @@ parking_lot = "0.12"
 once_cell = "1.20"
 dirs = "5"
 
-# ML Models - will be integrated after environment setup
+# ML Models - pure Rust (sem dependências C)
+# whisper-apr = { version = "0.2", default-features = false, features = ["simd", "std"] }
 # llama-gguf = { version = "0.14", default-features = false, features = ["cpu"] }
 
 [features]
