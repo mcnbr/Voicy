@@ -4,10 +4,10 @@ use parking_lot::RwLock;
 
 use crate::app_state::{OperationMode, PipelineState, PipelineStatus};
 use crate::config::Settings;
-use crate::models::{TtsModel, TranslateModel, WhisperModel};
+use crate::models::{TtsModel, TranslateModel, WhisperModelHandler};
 
 pub struct Pipeline {
-    whisper: WhisperModel,
+    whisper: WhisperModelHandler,
     translate: TranslateModel,
     tts: TtsModel,
 }
@@ -15,7 +15,7 @@ pub struct Pipeline {
 impl Pipeline {
     pub fn new() -> Self {
         Self {
-            whisper: WhisperModel::new(),
+            whisper: WhisperModelHandler::new(),
             translate: TranslateModel::new(),
             tts: TtsModel::new(),
         }
