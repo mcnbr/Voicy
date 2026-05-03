@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build
+dist/
+dist-electron/
+target/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+/target
+Cargo.lock
+
+# Models (download separately)
+models/
+!models/.gitkeep
+
+#Voicy
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temp
+temp/
+tmp/
