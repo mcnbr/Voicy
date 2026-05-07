@@ -320,8 +320,20 @@ function App() {
            <div className="card-header">
              <span>System State</span>
            </div>
-           <div className="value-large text-accent" style={{ color: getStatusColor(), fontSize: '1.75rem', marginBottom: '12px' }}>
+           <div className="value-large text-accent" style={{ color: getStatusColor(), fontSize: '1.75rem', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+               {(modelsLoading || isProcessing) && (
+                 <svg className="spinner" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 2s linear infinite' }}>
+                   <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                 </svg>
+               )}
+               {isRecording && (
+                 <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: '#ff453a', animation: 'pulse 1.5s infinite' }} />
+               )}
                {getStatusText()}
+               <style>{`
+                 @keyframes spin { 100% { transform: rotate(360deg); } }
+                 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+               `}</style>
            </div>
 
            <button

@@ -26,31 +26,36 @@ impl TranslatorModel {
             candle_core::Device::Cpu
         };
         
-        info!("Downloading/Loading TranslateGemma 4B via HuggingFace Hub...");
+        info!("Downloading/Loading TinyLlama 1.1B via HuggingFace Hub...");
         let cache = Cache::new(model_dir.clone());
         let api = ApiBuilder::new().with_cache_dir(cache.path().to_path_buf()).build()?;
         
-        let repo = api.model("mradermacher/translategemma-4b-it-GGUF".to_string());
-        let tokenizer_repo = api.model("unsloth/gemma-1.1-2b-it".to_string()); // fallback tokenizer
+        let repo = api.model("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string());
+        let tokenizer_repo = api.model("TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string());
         
         let tokenizer_path = tokenizer_repo.get("tokenizer.json").map_err(|e| { warn!("Failed to get tokenizer.json: {}", e); e }).ok();
-        let weights_path = repo.get("translategemma-4b-it.Q4_K_M.gguf").map_err(|e| { warn!("Failed to get gguf: {}", e); e }).ok();
+        let weights_path = repo.get("tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf").map_err(|e| { warn!("Failed to get gguf: {}", e); e }).ok();
         
         if let (Some(tp), Some(wp)) = (tokenizer_path, weights_path) {
             let tokenizer = Tokenizer::from_file(&tp).map_err(|e| anyhow::anyhow!(e))?;
             
-            info!("Loading TranslateGemma tensors into device ({:?})...", device);
+            info!("Loading TinyLlama tensors into device ({:?})...", device);
             let mut file = std::fs::File::open(&wp)?;
             let content = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| anyhow::anyhow!(e))?;
-            let model = ModelWeights::from_gguf(content, &mut file, &device).unwrap_or_else(|e| {
-                warn!("Failed to load GGUF weights, keeping stub: {}", e);
-                // Use a stub model if GGUF loading fails
-                let mut dummy_file = std::fs::File::open(&wp).unwrap();
-                let dummy_content = candle_core::quantized::gguf_file::Content::read(&mut dummy_file).unwrap();
-                ModelWeights::from_gguf(dummy_content, &mut dummy_file, &candle_core::Device::Cpu).unwrap()
-            });
+            let model = match ModelWeights::from_gguf(content, &mut file, &device) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("Failed to load GGUF weights, unsupported architecture?: {}", e);
+                    return Ok(Self {
+                        device,
+                        model: Mutex::new(None),
+                        tokenizer: None,
+                        loaded: false,
+                    });
+                }
+            };
             
-            info!("TranslateGemma model successfully loaded!");
+            info!("TinyLlama model successfully loaded!");
             return Ok(Self {
                 device,
                 model: Mutex::new(Some(model)),
@@ -83,7 +88,7 @@ impl TranslatorModel {
         let tgt_name = get_language_mapping(target_lang);
         let src_name = if source_lang == "auto" { "auto" } else { get_language_mapping(source_lang) };
         
-        let prompt = format!("<start_of_turn>user\nTranslate this text to {}. Preserve all number words exactly as written. Only output the translation.\n\n{}\n<end_of_turn>\n<start_of_turn>model\n", tgt_name, text);
+        let prompt = format!("<|system|>\nYou are a professional translator.\n<|user|>\nTranslate this text to {}. Only output the translation, nothing else.\n\n{}\n<|assistant|>\n", tgt_name, text);
         
         let tokenizer = self.tokenizer.as_ref().unwrap();
         let mut tokens = tokenizer
@@ -123,7 +128,7 @@ impl TranslatorModel {
             }
         }
         
-        let cleaned = output.replace("<start_of_turn>", "").replace("<end_of_turn>", "").trim().to_string();
+        let cleaned = output.replace("<|system|>", "").replace("<|user|>", "").replace("<|assistant|>", "").trim().to_string();
         info!("Translation complete: {}", cleaned);
         Ok(cleaned)
     }
