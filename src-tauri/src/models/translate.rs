@@ -26,41 +26,37 @@ impl TranslatorModel {
             candle_core::Device::Cpu
         };
         
-        let has_dummy = model_dir.join("model.bin").exists();
+        info!("Downloading/Loading TranslateGemma 4B via HuggingFace Hub...");
+        let cache = Cache::new(model_dir.clone());
+        let api = ApiBuilder::new().with_cache_dir(cache.path().to_path_buf()).build()?;
         
-        if has_dummy {
-            info!("Downloading/Loading TranslateGemma 4B via HuggingFace Hub...");
-            let cache = Cache::new(model_dir.clone());
-            let api = ApiBuilder::new().with_cache_dir(cache.path().to_path_buf()).build()?;
+        let repo = api.model("mradermacher/translategemma-4b-it-GGUF".to_string());
+        let tokenizer_repo = api.model("unsloth/gemma-1.1-2b-it".to_string()); // fallback tokenizer
+        
+        let tokenizer_path = tokenizer_repo.get("tokenizer.json").map_err(|e| { warn!("Failed to get tokenizer.json: {}", e); e }).ok();
+        let weights_path = repo.get("translategemma-4b-it.Q4_K_M.gguf").map_err(|e| { warn!("Failed to get gguf: {}", e); e }).ok();
+        
+        if let (Some(tp), Some(wp)) = (tokenizer_path, weights_path) {
+            let tokenizer = Tokenizer::from_file(&tp).map_err(|e| anyhow::anyhow!(e))?;
             
-            let repo = api.model("mradermacher/translategemma-4b-it-GGUF".to_string());
-            let tokenizer_repo = api.model("google/gemma-1.1-2b-it".to_string()); // fallback tokenizer
+            info!("Loading TranslateGemma tensors into device ({:?})...", device);
+            let mut file = std::fs::File::open(&wp)?;
+            let content = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| anyhow::anyhow!(e))?;
+            let model = ModelWeights::from_gguf(content, &mut file, &device).unwrap_or_else(|e| {
+                warn!("Failed to load GGUF weights, keeping stub: {}", e);
+                // Use a stub model if GGUF loading fails
+                let mut dummy_file = std::fs::File::open(&wp).unwrap();
+                let dummy_content = candle_core::quantized::gguf_file::Content::read(&mut dummy_file).unwrap();
+                ModelWeights::from_gguf(dummy_content, &mut dummy_file, &candle_core::Device::Cpu).unwrap()
+            });
             
-            let tokenizer_path = tokenizer_repo.get("tokenizer.json").map_err(|e| { warn!("Failed to get tokenizer.json: {}", e); e }).ok();
-            let weights_path = repo.get("translategemma-4b-it.Q4_K_M.gguf").map_err(|e| { warn!("Failed to get gguf: {}", e); e }).ok();
-            
-            if let (Some(tp), Some(wp)) = (tokenizer_path, weights_path) {
-                let tokenizer = Tokenizer::from_file(&tp).map_err(|e| anyhow::anyhow!(e))?;
-                
-                info!("Loading TranslateGemma tensors into device ({:?})...", device);
-                let mut file = std::fs::File::open(&wp)?;
-                let content = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| anyhow::anyhow!(e))?;
-                let model = ModelWeights::from_gguf(content, &mut file, &device).unwrap_or_else(|e| {
-                    warn!("Failed to load GGUF weights, keeping stub: {}", e);
-                    // Use a stub model if GGUF loading fails
-                    let mut dummy_file = std::fs::File::open(&wp).unwrap();
-                    let dummy_content = candle_core::quantized::gguf_file::Content::read(&mut dummy_file).unwrap();
-                    ModelWeights::from_gguf(dummy_content, &mut dummy_file, &candle_core::Device::Cpu).unwrap()
-                });
-                
-                info!("TranslateGemma model successfully loaded!");
-                return Ok(Self {
-                    device,
-                    model: Mutex::new(Some(model)),
-                    tokenizer: Some(tokenizer),
-                    loaded: true,
-                });
-            }
+            info!("TranslateGemma model successfully loaded!");
+            return Ok(Self {
+                device,
+                model: Mutex::new(Some(model)),
+                tokenizer: Some(tokenizer),
+                loaded: true,
+            });
         }
         
         warn!("Translator model not downloaded. Using placeholder mode.");
