@@ -89,7 +89,7 @@ export function useWebSocket(): UseWebSocketReturn {
   });
   const [lastTranscription, setLastTranscription] = useState<TranscriptionData | null>(null);
   const [lastTranslation, setLastTranslation] = useState<TranslationData | null>(null);
-  const [audioLevel] = useState<number[] | null>(null);
+  const [audioLevel, setAudioLevel] = useState<number[] | null>(null);
   const [refAudioStatus] = useState<{ used_voice_cloning: boolean; ref_source: string | null } | null>(null);
   const [manualTriggerStatus] = useState<string | null>(null);
   const [liveState] = useState<string | null>(null);
@@ -137,7 +137,8 @@ export function useWebSocket(): UseWebSocketReturn {
       try {
         const res: any = await invoke("get_status");
         setIsConnected(true);
-        setIsRecording(res.status === "recording");
+        const recording = res.status === "recording";
+        setIsRecording(recording);
         
         if (res.last_transcription) {
           setLastTranscription({ text: res.last_transcription, source_lang: "auto" });
@@ -148,7 +149,7 @@ export function useWebSocket(): UseWebSocketReturn {
         
         if (res.status === "loading") {
             setModelsStatus({ whisper: "loading", gemma: "loading", omnivoice: "loading" });
-        } else if (res.status === "ready" || res.status === "recording" || res.status === "processing") {
+        } else if (res.status === "ready" || recording || res.status === "processing") {
             setModelsStatus({ whisper: "ready", gemma: "ready", omnivoice: "ready" });
         }
         
@@ -166,6 +167,19 @@ export function useWebSocket(): UseWebSocketReturn {
       }
     }, 500);
     return () => clearInterval(interval);
+  }, []);
+
+  // Poll audio levels from Rust (32-bin RMS from the live mic stream)
+  useEffect(() => {
+    const lvlInterval = setInterval(async () => {
+      try {
+        const levels: number[] = await invoke("get_audio_levels") as number[];
+        setAudioLevel(levels);
+      } catch {
+        // ignore - not critical
+      }
+    }, 80); // ~12fps for smooth waveform
+    return () => clearInterval(lvlInterval);
   }, []);
 
   const send = useCallback((_msg: any) => {

@@ -3,7 +3,7 @@ use log::{info, warn};
 use std::path::Path;
 use candle_core::{Device, Tensor};
 use tokenizers::Tokenizer;
-use hf_hub::{api::sync::ApiBuilder, Cache};
+use hf_hub::api::sync::ApiBuilder;
 use std::sync::Mutex;
 use candle_transformers::models::quantized_llama::ModelWeights;
 use candle_transformers::generation::LogitsProcessor;
@@ -20,15 +20,15 @@ impl TranslatorModel {
         let model_dir = std::path::Path::new(models_path).join("translate-gemma-4b");
         info!("Initializing Translator model from: {:?}", model_dir);
         
-        let device = if cfg!(target_os = "linux") || cfg!(feature = "cuda") {
-            candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu)
-        } else {
-            candle_core::Device::Cpu
-        };
+        // Ensure the model directory exists
+        std::fs::create_dir_all(&model_dir)?;
+        
+        let device = candle_core::Device::Cpu;
         
         info!("Downloading/Loading TinyLlama 1.1B via HuggingFace Hub...");
-        let cache = Cache::new(model_dir.clone());
-        let api = ApiBuilder::new().with_cache_dir(cache.path().to_path_buf()).build()?;
+        let api = ApiBuilder::new()
+            .with_cache_dir(model_dir.clone())
+            .build()?;
         
         let repo = api.model("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string());
         let tokenizer_repo = api.model("TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string());

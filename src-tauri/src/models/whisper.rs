@@ -5,7 +5,7 @@ use candle_core::{Device, Tensor, IndexOp};
 use candle_nn::ops::softmax;
 use candle_transformers::models::whisper::{self as m, audio, Config};
 use tokenizers::Tokenizer;
-use hf_hub::{api::sync::ApiBuilder, Cache};
+use hf_hub::api::sync::ApiBuilder;
 use std::sync::Mutex;
 
 pub fn token_id(tokenizer: &Tokenizer, token: &str) -> candle_core::Result<u32> {
@@ -29,19 +29,20 @@ impl WhisperModel {
         let model_dir = std::path::Path::new(models_path).join("whisper-large-v3-turbo");
         info!("Initializing Whisper model from: {:?}", model_dir);
         
-        let device = if cfg!(target_os = "linux") || cfg!(feature = "cuda") {
-            candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu)
-        } else {
-            candle_core::Device::Cpu
-        };
+        // Ensure the model directory exists
+        std::fs::create_dir_all(&model_dir)?;
+        
+        let device = candle_core::Device::Cpu;
         
         let mel_bytes = include_bytes!("melfilters128.bytes").as_slice();
         let mut mel_filters = vec![0f32; mel_bytes.len() / 4];
         <byteorder::LittleEndian as byteorder::ByteOrder>::read_f32_into(mel_bytes, &mut mel_filters);
 
         info!("Downloading/Loading Whisper Large V3 Turbo via HuggingFace Hub...");
-        let cache = Cache::new(model_dir.clone());
-        let api = ApiBuilder::new().with_cache_dir(cache.path().to_path_buf()).build()?;
+        // Use the model_dir itself as the HF cache directory
+        let api = ApiBuilder::new()
+            .with_cache_dir(model_dir.clone())
+            .build()?;
         let repo_gguf = api.model("oxide-lab/whisper-large-v3-turbo-GGUF".to_string());
         let repo_orig = api.model("openai/whisper-large-v3-turbo".to_string());
         
@@ -72,7 +73,7 @@ impl WhisperModel {
             });
         }
         
-        warn!("Whisper model not downloaded. Using placeholder mode.");
+        warn!("Whisper model files not available yet. Using placeholder mode.");
         Ok(Self {
             device,
             model: Mutex::new(None),

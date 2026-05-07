@@ -124,14 +124,7 @@ pub async fn stop_capture(app: AppHandle) -> Result<String, String> {
                         data.status = AppStatus::Ready;
                         data.last_transcription = Some(result.original_text.clone());
                         data.last_translation = Some(result.translated_text.clone());
-                        
-                        if !result.audio_output.is_empty() {
-                            let mut playback = crate::audio::AudioPlayback::new();
-                            if let Err(e) = playback.play(&result.audio_output) {
-                                log::error!("Falha ao reproduzir áudio: {}", e);
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis((result.audio_output.len() as u64 * 1000) / 16000));
-                        }
+                        // Audio playback intentionally removed — no sounds from the app
                     }
                     Err(e_string) => {
                         let mut data = state_clone.lock().await;
@@ -218,6 +211,11 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<String, St
 #[tauri::command]
 pub fn get_hardware_info() -> HardwareInfo {
     HardwareInfo::detect()
+}
+
+#[tauri::command]
+pub fn get_audio_levels() -> Vec<f32> {
+    crate::audio::get_audio_levels().to_vec()
 }
 
 #[derive(Serialize)]

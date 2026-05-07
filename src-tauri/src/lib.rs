@@ -49,6 +49,7 @@ pub fn run() {
             commands::check_models_status,
             commands::download_model,
             commands::reload_models,
+            commands::get_audio_levels,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

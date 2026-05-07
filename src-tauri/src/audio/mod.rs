@@ -1,13 +1,17 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use log::{error, info};
+use log::{error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+// Persistent audio buffer — accumulates ALL samples during recording
 static AUDIO_BUFFER: Mutex<Option<Arc<Mutex<Vec<f32>>>>> = Mutex::new(None);
+
+// Rolling RMS level for UI visualizer (32 bins)
+static AUDIO_LEVEL: Mutex<[f32; 32]> = Mutex::new([0.0f32; 32]);
 
 pub fn init_audio_buffer() {
     let mut guard = AUDIO_BUFFER.lock().unwrap();
@@ -48,30 +52,31 @@ pub fn get_audio_buffer() -> Vec<f32> {
     Vec::new()
 }
 
-pub fn list_input_devices() -> Vec<String> {
-    let host = cpal::default_host();
-    let mut devices = Vec::new();
-    if let Ok(enumerator) = host.input_devices() {
-        for d in enumerator {
-            if let Ok(name) = d.name() {
-                devices.push(name);
-            }
-        }
+pub fn get_audio_levels() -> [f32; 32] {
+    if let Ok(lvl) = AUDIO_LEVEL.lock() {
+        *lvl
+    } else {
+        [0.0f32; 32]
     }
-    devices
 }
 
-pub fn list_output_devices() -> Vec<String> {
-    let host = cpal::default_host();
-    let mut devices = Vec::new();
-    if let Ok(enumerator) = host.output_devices() {
-        for d in enumerator {
-            if let Ok(name) = d.name() {
-                devices.push(name);
-            }
-        }
+fn compute_rms_bins(data: &[f32], bins: &mut [f32; 32]) {
+    if data.is_empty() {
+        bins.fill(0.0);
+        return;
     }
-    devices
+    let bin_size = (data.len() / 32).max(1);
+    for (i, bin) in bins.iter_mut().enumerate() {
+        let start = i * bin_size;
+        let end = ((i + 1) * bin_size).min(data.len());
+        if start >= data.len() {
+            *bin = 0.0;
+            continue;
+        }
+        let rms = (data[start..end].iter().map(|s| s * s).sum::<f32>() / (end - start) as f32).sqrt();
+        // Smooth towards new value
+        *bin = *bin * 0.7 + rms * 0.3;
+    }
 }
 
 pub fn start_capture_thread() -> Result<(), String> {
@@ -93,7 +98,7 @@ pub fn start_capture_thread() -> Result<(), String> {
     };
 
     let sample_rate = config.sample_rate().0;
-    let channels = config.channels();
+    let channels = config.channels() as usize;
     info!("Audio config: {} Hz, {} channels", sample_rate, channels);
 
     let buffer = {
@@ -108,26 +113,44 @@ pub fn start_capture_thread() -> Result<(), String> {
     CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
     clear_audio_buffer();
 
-    let (_stop_tx, stop_rx) = std_mpsc::channel::<()>();
+    // Reset level meters
+    if let Ok(mut lvl) = AUDIO_LEVEL.lock() {
+        lvl.fill(0.0);
+    }
 
     thread::spawn(move || {
         let err_fn = |err| error!("Audio capture error: {}", err);
-        let buffer = buffer;
+
+        // Helper closure: converts multi-channel data to mono f32 and accumulates
+        let process_samples = {
+            let buffer = buffer.clone();
+            move |mono_data: Vec<f32>| {
+                // Update RMS level visualizer
+                if let Ok(mut lvl) = AUDIO_LEVEL.lock() {
+                    compute_rms_bins(&mono_data, &mut lvl);
+                }
+                // Accumulate into main buffer (no clearing during capture!)
+                if let Ok(mut buf) = buffer.lock() {
+                    buf.extend_from_slice(&mono_data);
+                }
+            }
+        };
+
+        let process_samples = Arc::new(Mutex::new(process_samples));
 
         let result = match config.sample_format() {
             cpal::SampleFormat::F32 => {
+                let ps = process_samples.clone();
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &_| {
                         if CAPTURE_ACTIVE.load(Ordering::SeqCst) {
-                            if let Ok(mut buf) = buffer.lock() {
-                                buf.extend_from_slice(data);
-                                if buf.len() >= 16000 {
-                                    let chunk = buf.len();
-                                    buf.clear();
-                                    info!("Audio chunk captured: {} samples", chunk);
-                                }
-                            }
+                            // Mix down to mono
+                            let mono: Vec<f32> = data
+                                .chunks(channels)
+                                .map(|ch| ch.iter().sum::<f32>() / channels as f32)
+                                .collect();
+                            if let Ok(f) = ps.lock() { f(mono); }
                         }
                     },
                     err_fn,
@@ -135,19 +158,16 @@ pub fn start_capture_thread() -> Result<(), String> {
                 )
             }
             cpal::SampleFormat::I16 => {
+                let ps = process_samples.clone();
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[i16], _: &_| {
                         if CAPTURE_ACTIVE.load(Ordering::SeqCst) {
-                            if let Ok(mut buf) = buffer.lock() {
-                                let float_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                                buf.extend_from_slice(&float_data);
-                                if buf.len() >= 16000 {
-                                    let chunk = buf.len();
-                                    buf.clear();
-                                    info!("Audio chunk captured: {} samples", chunk);
-                                }
-                            }
+                            let mono: Vec<f32> = data
+                                .chunks(channels)
+                                .map(|ch| ch.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / channels as f32)
+                                .collect();
+                            if let Ok(f) = ps.lock() { f(mono); }
                         }
                     },
                     err_fn,
@@ -155,19 +175,16 @@ pub fn start_capture_thread() -> Result<(), String> {
                 )
             }
             cpal::SampleFormat::U16 => {
+                let ps = process_samples.clone();
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[u16], _: &_| {
                         if CAPTURE_ACTIVE.load(Ordering::SeqCst) {
-                            if let Ok(mut buf) = buffer.lock() {
-                                let float_data: Vec<f32> = data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
-                                buf.extend_from_slice(&float_data);
-                                if buf.len() >= 16000 {
-                                    let chunk = buf.len();
-                                    buf.clear();
-                                    info!("Audio chunk captured: {} samples", chunk);
-                                }
-                            }
+                            let mono: Vec<f32> = data
+                                .chunks(channels)
+                                .map(|ch| ch.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).sum::<f32>() / channels as f32)
+                                .collect();
+                            if let Ok(f) = ps.lock() { f(mono); }
                         }
                     },
                     err_fn,
@@ -190,22 +207,20 @@ pub fn start_capture_thread() -> Result<(), String> {
                 }
                 info!("Audio stream started successfully");
 
-                loop {
-                    if stop_rx.try_recv().is_ok() {
-                        info!("Stop signal received");
-                        break;
-                    }
-                    if !CAPTURE_ACTIVE.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(100));
+                while CAPTURE_ACTIVE.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(50));
                 }
 
                 drop(stream);
-                info!("Audio stream stopped");
+                // Reset levels when capture stops
+                if let Ok(mut lvl) = AUDIO_LEVEL.lock() {
+                    lvl.fill(0.0);
+                }
+                info!("Audio stream stopped. Total samples: {}", get_audio_buffer_samples());
             }
             Err(e) => {
                 error!("Failed to build stream: {}", e);
+                CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
             }
         }
 
@@ -222,12 +237,11 @@ pub fn stop_capture_thread() -> Result<usize, String> {
     }
 
     CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
-
-    thread::sleep(Duration::from_millis(200));
+    // Give the thread time to flush and stop
+    thread::sleep(Duration::from_millis(300));
 
     let samples = get_audio_buffer_samples();
     info!("Capture stopped. Total samples: {}", samples);
-
     Ok(samples)
 }
 
@@ -237,27 +251,23 @@ pub fn is_capturing() -> bool {
 
 pub fn test_audio_input() -> Result<bool, String> {
     let host = cpal::default_host();
-    
     match host.default_input_device() {
-        Some(device) => {
-            match device.name() {
-                Ok(name) => {
-                    info!("Found audio input device: {}", name);
-                    Ok(true)
-                }
-                Err(_) => Ok(false)
+        Some(device) => match device.name() {
+            Ok(name) => {
+                info!("Found audio input device: {}", name);
+                Ok(true)
             }
-        }
-        None => Ok(false)
+            Err(_) => Ok(false),
+        },
+        None => Ok(false),
     }
 }
 
 pub fn get_audio_devices() -> Result<(Vec<String>, Vec<String>), String> {
     let host = cpal::default_host();
-    
     let mut inputs = Vec::new();
     let mut outputs = Vec::new();
-    
+
     if let Ok(devices) = host.input_devices() {
         for d in devices {
             if let Ok(name) = d.name() {
@@ -265,7 +275,6 @@ pub fn get_audio_devices() -> Result<(Vec<String>, Vec<String>), String> {
             }
         }
     }
-    
     if let Ok(devices) = host.output_devices() {
         for d in devices {
             if let Ok(name) = d.name() {
@@ -273,66 +282,5 @@ pub fn get_audio_devices() -> Result<(Vec<String>, Vec<String>), String> {
             }
         }
     }
-    
     Ok((inputs, outputs))
-}
-
-pub struct AudioPlayback {
-    output_stream: Option<cpal::Stream>,
-    #[allow(dead_code)]
-    samples: Option<Vec<f32>>,
-}
-
-impl AudioPlayback {
-    pub fn new() -> Self {
-        Self {
-            output_stream: None,
-            samples: None,
-        }
-    }
-
-    pub fn play(&mut self, samples: &[f32]) -> Result<(), Box<dyn std::error::Error>> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("No output device available")?;
-
-        let config = device.default_output_config()?;
-
-        let err_fn = |err| error!("Audio playback error: {}", err);
-
-        let samples_owned: Vec<f32> = samples.to_vec();
-        let samples_len = samples_owned.len();
-        let samples_for_closure = samples_owned.clone();
-
-        let stream = device.build_output_stream(
-            &config.into(),
-            move |data: &mut [f32], _: &_| {
-                let len = data.len().min(samples_len);
-                data[..len].copy_from_slice(&samples_for_closure[..len]);
-                if len < data.len() {
-                    data[len..].fill(0.0);
-                }
-            },
-            err_fn,
-            None,
-        )?;
-
-        stream.play()?;
-        self.output_stream = Some(stream);
-        self.samples = Some(samples_owned);
-
-        Ok(())
-    }
-
-    pub fn stop(&mut self) {
-        self.output_stream = None;
-        self.samples = None;
-    }
-}
-
-impl Default for AudioPlayback {
-    fn default() -> Self {
-        Self::new()
-    }
 }
