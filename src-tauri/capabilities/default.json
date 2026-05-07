@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Default capabilities for Voicy",
   "windows": ["main"],
   "permissions": [
     "core:default",

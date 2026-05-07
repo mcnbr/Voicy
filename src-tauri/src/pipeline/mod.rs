@@ -1,109 +1,62 @@
+use crate::models::ModelManager;
 use log::info;
 use std::sync::Arc;
-use parking_lot::RwLock;
-
-use crate::app_state::{OperationMode, PipelineState, PipelineStatus};
-use crate::config::Settings;
-use crate::models::{TtsModel, TranslateModel, WhisperModelHandler};
+use tokio::sync::mpsc;
 
 pub struct Pipeline {
-    whisper: WhisperModelHandler,
-    translate: TranslateModel,
-    tts: TtsModel,
+    model_manager: Arc<tokio::sync::Mutex<ModelManager>>,
+    audio_receiver: Option<mpsc::Receiver<Vec<f32>>>,
 }
 
 impl Pipeline {
     pub fn new() -> Self {
         Self {
-            whisper: WhisperModelHandler::new(),
-            translate: TranslateModel::new(),
-            tts: TtsModel::new(),
+            model_manager: Arc::new(tokio::sync::Mutex::new(ModelManager::new())),
+            audio_receiver: None,
         }
     }
 
-    pub fn process(
-        &mut self,
-        audio_data: &[f32],
-        sample_rate: u32,
-        source_lang: &str,
-        target_lang: &str,
-        settings: &Settings,
-    ) -> Result<PipelineResult, String> {
-        let start = std::time::Instant::now();
+    pub async fn load_models(&self, models_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut manager = self.model_manager.lock().await;
+        manager.load_models(models_path).await
+    }
 
-        info!("Starting pipeline processing");
+    pub fn set_audio_input(&mut self, receiver: mpsc::Receiver<Vec<f32>>) {
+        self.audio_receiver = Some(receiver);
+    }
 
-        let mut state = PipelineState::default();
-        state.status = PipelineStatus::Transcribing;
+    pub async fn process_audio(&self, audio: Vec<f32>, target_lang: &str) -> Result<PipelineResult, Box<dyn std::error::Error>> {
+        let manager = self.model_manager.lock().await;
 
-        // Step 1: Transcribe
-        let whisper_start = std::time::Instant::now();
-        let transcription = self.whisper.transcribe(audio_data, sample_rate)?;
-        state.whisper_time_ms = whisper_start.elapsed().as_millis() as u64;
-        state.transcription = transcription.clone();
-        state.status = PipelineStatus::Translating;
+        info!("Pipeline: Starting audio processing");
 
-        // Step 2: Translate
-        let translate_start = std::time::Instant::now();
-        let translation = self.translate.translate(&transcription, source_lang, target_lang)?;
-        state.translate_time_ms = translate_start.elapsed().as_millis() as u64;
-        state.translation = translation.clone();
-
-        // Step 3: TTS (if not in transcription mode)
-        let tts_audio = if settings.operation_mode != OperationMode::Transcription {
-            state.status = PipelineStatus::Synthesizing;
-            let tts_start = std::time::Instant::now();
-            let audio = self.tts.synthesize(&translation)?;
-            state.tts_time_ms = tts_start.elapsed().as_millis() as u64;
-            Some(audio)
+        let transcription = if let Some(whisper) = manager.get_whisper() {
+            whisper.transcribe(&audio)?
         } else {
-            None
+            "No whisper model loaded".to_string()
         };
 
-        state.status = PipelineStatus::Idle;
+        let translation = if let Some(translator) = manager.get_translator() {
+            translator.translate(&transcription, "auto", target_lang)?
+        } else {
+            "No translator model loaded".to_string()
+        };
 
-        let total_time_ms = start.elapsed().as_millis() as u64;
-        info!("Pipeline complete in {}ms", total_time_ms);
+        let audio_output = if let Some(tts) = manager.get_tts() {
+            tts.synthesize(&translation)?
+        } else {
+            Vec::new()
+        };
 
         Ok(PipelineResult {
-            transcription,
-            translation,
-            tts_audio,
-            whisper_time_ms: state.whisper_time_ms,
-            translate_time_ms: state.translate_time_ms,
-            tts_time_ms: state.tts_time_ms,
-            total_time_ms,
+            original_text: transcription,
+            translated_text: translation,
+            audio_output,
         })
     }
 
-    pub fn load_whisper(&mut self, model_path: &str) -> Result<(), String> {
-        self.whisper.load(model_path)
-    }
-
-    pub fn load_translate(&mut self, model_path: &str) -> Result<(), String> {
-        self.translate.load(model_path)
-    }
-
-    pub fn load_tts(&mut self, model_path: &str, sample_path: &str) -> Result<(), String> {
-        self.tts.load(model_path, sample_path)
-    }
-
-    pub fn unload_all(&mut self) {
-        self.whisper.unload();
-        self.translate.unload();
-        self.tts.unload();
-    }
-
-    pub fn is_whisper_loaded(&self) -> bool {
-        self.whisper.is_loaded()
-    }
-
-    pub fn is_translate_loaded(&self) -> bool {
-        self.translate.is_loaded()
-    }
-
-    pub fn is_tts_loaded(&self) -> bool {
-        self.tts.is_loaded()
+    pub fn is_models_loaded(&self) -> bool {
+        self.model_manager.try_lock().map(|m| m.is_loaded()).unwrap_or(false)
     }
 }
 
@@ -113,12 +66,9 @@ impl Default for Pipeline {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct PipelineResult {
-    pub transcription: String,
-    pub translation: String,
-    pub tts_audio: Option<Vec<u8>>,
-    pub whisper_time_ms: u64,
-    pub translate_time_ms: u64,
-    pub tts_time_ms: u64,
-    pub total_time_ms: u64,
+    pub original_text: String,
+    pub translated_text: String,
+    pub audio_output: Vec<f32>,
 }

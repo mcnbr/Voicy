@@ -1,89 +1,85 @@
+use crate::config::AppConfig;
+use crate::hardware::HardwareInfo;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::sync::Arc;
+use tauri::Manager;
+use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AppState {
-    pub hardware: HardwareInfo,
-    pub audio: AudioState,
-    pub pipeline: PipelineState,
-    pub models: ModelsState,
-    pub settings: Settings,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HardwareInfo {
-    pub has_cuda: bool,
-    pub cuda_device: Option<String>,
-    pub vram_used_mb: u64,
-    pub vram_available_mb: u64,
-    pub ram_used_mb: u64,
-    pub ram_total_mb: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AudioState {
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-    pub is_capturing: bool,
-    pub is_playing: bool,
-    pub volume: f32,
-    pub sample_rate: u32,
-    pub channels: u16,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PipelineState {
-    pub status: PipelineStatus,
-    pub current_mode: OperationMode,
-    pub transcription: String,
-    pub translation: String,
-    pub whisper_time_ms: u64,
-    pub translate_time_ms: u64,
-    pub tts_time_ms: u64,
-    pub audio_buffer: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum PipelineStatus {
-    #[default]
-    Idle,
-    Capturing,
-    Transcribing,
-    Translating,
-    Synthesizing,
-    Playing,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OperationMode {
-    #[default]
-    Automatic,
+    Auto,
     Manual,
     Live,
     Transcription,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ModelsState {
-    pub whisper_loaded: bool,
-    pub translate_loaded: bool,
-    pub tts_loaded: bool,
-    pub whisper_model: Option<String>,
-    pub translate_model: Option<String>,
-    pub tts_model: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AppStatus {
+    Idle,
+    Loading,
+    Ready,
+    Recording,
+    Processing,
+    Error(String),
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Settings {
+#[derive(Clone)]
+pub struct AppStateData {
+    pub status: AppStatus,
+    pub mode: OperationMode,
     pub source_language: String,
     pub target_language: String,
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-    pub operation_mode: OperationMode,
-    pub live_pause_threshold_ms: u64,
-    pub volume: f32,
-    pub auto_play: bool,
-    pub models_path: Option<String>,
+    pub hardware_info: HardwareInfo,
+    pub config: AppConfig,
+    pub last_transcription: Option<String>,
+    pub last_translation: Option<String>,
+    pub pipeline: Option<Arc<crate::pipeline::Pipeline>>,
+}
+
+impl Default for AppStateData {
+    fn default() -> Self {
+        Self {
+            status: AppStatus::Loading,
+            mode: OperationMode::Auto,
+            source_language: "auto".to_string(),
+            target_language: "en".to_string(),
+            hardware_info: HardwareInfo::detect(),
+            config: AppConfig::default(),
+            last_transcription: Some("Carregando modelos...".to_string()),
+            last_translation: Some("Aguarde...".to_string()),
+            pipeline: None,
+        }
+    }
+}
+
+pub type AppState = Arc<Mutex<AppStateData>>;
+
+pub fn init_app_state(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let state = Arc::new(Mutex::new(AppStateData::default()));
+    app_handle.manage(state.clone());
+    
+    let models_path = crate::models::downloader::create_models_directory().unwrap_or_else(|_| "models".to_string());
+    
+    tauri::async_runtime::spawn(async move {
+        let pipeline = crate::pipeline::Pipeline::new();
+        let res = pipeline.load_models(&models_path).await.map_err(|e| e.to_string());
+        if let Err(e_string) = res {
+            log::error!("Failed to load models: {}", e_string);
+            let mut data = state.lock().await;
+            data.status = AppStatus::Error(format!("Model load failed: {}", e_string));
+            return;
+        }
+        
+        let mut data = state.lock().await;
+        data.pipeline = Some(Arc::new(pipeline));
+        data.status = AppStatus::Ready;
+        data.last_transcription = Some("Sistema Pronto".to_string());
+        data.last_translation = Some("Modelos Carregados".to_string());
+    });
+    
+    Ok(())
+}
+
+pub fn get_state(app_handle: &tauri::AppHandle) -> &AppState {
+    app_handle.state::<AppState>().inner()
 }

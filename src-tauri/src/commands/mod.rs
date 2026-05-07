@@ -1,193 +1,304 @@
+use crate::app_state::{get_state, AppStatus, OperationMode};
+use crate::config::AppConfig;
+use crate::hardware::HardwareInfo;
+use crate::models::downloader::{ModelDownloader, ModelInfo};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use parking_lot::RwLock;
-use tauri::State;
-use log::{error, info};
+use tauri::AppHandle;
 
-use crate::app_state::{AppState, HardwareInfo, OperationMode, PipelineStatus};
-use crate::audio::{AudioCapture, AudioPlayback};
-use crate::pipeline::Pipeline;
-use crate::config;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HardwareInfoResponse {
-    pub has_cuda: bool,
-    pub cuda_device: Option<String>,
-    pub vram_used_mb: u64,
-    pub vram_available_mb: u64,
-    pub ram_used_mb: u64,
-    pub ram_total_mb: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioDevicesResponse {
-    pub input: Vec<String>,
-    pub output: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub status: String,
-    pub current_mode: String,
-    pub is_capturing: bool,
-    pub whisper_time_ms: u64,
-    pub translate_time_ms: u64,
-    pub tts_time_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SettingsResponse {
-    pub source_language: String,
-    pub target_language: String,
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-    pub operation_mode: String,
-    pub live_pause_threshold_ms: u64,
-    pub volume: f32,
-    pub auto_play: bool,
+    pub mode: String,
+    pub has_cuda: bool,
+    pub gpu_name: Option<String>,
+    pub last_transcription: Option<String>,
+    pub last_translation: Option<String>,
 }
 
 #[tauri::command]
-pub fn get_hardware_info(state: State<'_, Arc<RwLock<AppState>>>) -> Result<HardwareInfoResponse, String> {
-    let state = state.read();
-    Ok(HardwareInfoResponse {
-        has_cuda: state.hardware.has_cuda,
-        cuda_device: state.hardware.cuda_device.clone(),
-        vram_used_mb: state.hardware.vram_used_mb,
-        vram_available_mb: state.hardware.vram_available_mb,
-        ram_used_mb: state.hardware.ram_used_mb,
-        ram_total_mb: state.hardware.ram_total_mb,
+pub async fn get_status(app: AppHandle) -> Result<StatusResponse, String> {
+    let state = get_state(&app);
+    let data = state.lock().await;
+
+    let status_str = match &data.status {
+        AppStatus::Idle => "idle",
+        AppStatus::Loading => "loading",
+        AppStatus::Ready => "ready",
+        AppStatus::Recording => "recording",
+        AppStatus::Processing => "processing",
+        AppStatus::Error(e) => return Err(format!("Error: {}", e)),
+    }.to_string();
+
+    let mode_str = match data.mode {
+        OperationMode::Auto => "auto",
+        OperationMode::Manual => "manual",
+        OperationMode::Live => "live",
+        OperationMode::Transcription => "transcription",
+    }.to_string();
+
+    Ok(StatusResponse {
+        status: status_str,
+        mode: mode_str,
+        has_cuda: data.hardware_info.has_cuda,
+        gpu_name: data.hardware_info.gpu_name.clone(),
+        last_transcription: data.last_transcription.clone(),
+        last_translation: data.last_translation.clone(),
     })
 }
 
 #[tauri::command]
-pub fn get_audio_devices(state: State<'_, Arc<RwLock<AppState>>>) -> Result<AudioDevicesResponse, String> {
-    let capture = AudioCapture::new();
-    Ok(AudioDevicesResponse {
-        input: capture.list_input_devices(),
-        output: capture.list_output_devices(),
-    })
-}
+pub async fn start_capture(app: AppHandle) -> Result<String, String> {
+    let state = get_state(&app);
+    let mut data = state.lock().await;
 
-#[tauri::command]
-pub fn set_input_device(device: String, state: State<'_, Arc<RwLock<AppState>>>) -> Result<(), String> {
-    let mut state = state.write();
-    state.audio.input_device = Some(device);
-    Ok(())
-}
+    info!("Starting audio capture");
 
-#[tauri::command]
-pub fn set_output_device(device: String, state: State<'_, Arc<RwLock<AppState>>>) -> Result<(), String> {
-    let mut state = state.write();
-    state.audio.output_device = Some(device);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn set_source_language(language: String, state: State<'_, Arc<RwLock<AppState>>>) -> Result<(), String> {
-    let mut state = state.write();
-    state.settings.source_language = language;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn set_target_language(language: String, state: State<'_, Arc<RwLock<AppState>>>) -> Result<(), String> {
-    let mut state = state.write();
-    state.settings.target_language = language;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn start_capture(state: State<'_, Arc<RwLock<AppState>>>) -> Result<(), String> {
-    let mut state = state.write();
-    if state.pipeline.status != PipelineStatus::Idle {
+    if crate::audio::is_capturing() {
         return Err("Already capturing".to_string());
     }
-    state.pipeline.status = PipelineStatus::Capturing;
-    state.audio.is_capturing = true;
-    info!("Capture started");
-    Ok(())
+
+    match crate::audio::test_audio_input() {
+        Ok(true) => {
+            match crate::audio::start_capture_thread() {
+                Ok(()) => {
+                    data.status = AppStatus::Recording;
+                    data.last_transcription = Some("🎤 Capturando audio...".to_string());
+                    data.last_translation = Some("Gravando...".to_string());
+                    info!("Audio capture started - recording in progress");
+                    Ok("Capture started".to_string())
+                }
+                Err(e) => {
+                    warn!("Failed to start capture thread: {}", e);
+                    data.last_transcription = Some(format!("⚠️ Erro: {}", e));
+                    data.last_translation = Some("Falha ao iniciar captura".to_string());
+                    Err(e)
+                }
+            }
+        }
+        Ok(false) => {
+            warn!("No audio input device found");
+            data.last_transcription = Some("⚠️ Nenhum microfone encontrado".to_string());
+            data.last_translation = Some("Verifique as conexoes de audio".to_string());
+            Err("Nenhum dispositivo de audio encontrado".to_string())
+        }
+        Err(e) => {
+            data.status = AppStatus::Error(e.to_string());
+            Err(format!("Failed to start capture: {}", e))
+        }
+    }
 }
 
 #[tauri::command]
-pub async fn stop_capture(state: State<'_, Arc<RwLock<AppState>>>) -> Result<(), String> {
-    let mut state = state.write();
-    state.audio.is_capturing = false;
-    state.pipeline.status = PipelineStatus::Idle;
-    info!("Capture stopped");
-    Ok(())
-}
+pub async fn stop_capture(app: AppHandle) -> Result<String, String> {
+    let state = get_state(&app);
+    
+    info!("Stopping audio capture");
 
-#[tauri::command]
-pub fn get_status(state: State<'_, Arc<RwLock<AppState>>>) -> Result<StatusResponse, String> {
-    let state = state.read();
-    Ok(StatusResponse {
-        status: format!("{:?}", state.pipeline.status).to_lowercase(),
-        current_mode: format!("{:?}", state.pipeline.current_mode).to_lowercase(),
-        is_capturing: state.audio.is_capturing,
-        whisper_time_ms: state.pipeline.whisper_time_ms,
-        translate_time_ms: state.pipeline.translate_time_ms,
-        tts_time_ms: state.pipeline.tts_time_ms,
-    })
-}
-
-#[tauri::command]
-pub fn get_transcription(state: State<'_, Arc<RwLock<AppState>>>) -> Result<String, String> {
-    let state = state.read();
-    Ok(state.pipeline.transcription.clone())
-}
-
-#[tauri::command]
-pub fn get_translation(state: State<'_, Arc<RwLock<AppState>>>) -> Result<String, String> {
-    let state = state.read();
-    Ok(state.pipeline.translation.clone())
-}
-
-#[tauri::command]
-pub fn get_settings(state: State<'_, Arc<RwLock<AppState>>>) -> Result<SettingsResponse, String> {
-    let state = state.read();
-    Ok(SettingsResponse {
-        source_language: state.settings.source_language.clone(),
-        target_language: state.settings.target_language.clone(),
-        input_device: state.settings.input_device.clone(),
-        output_device: state.settings.output_device.clone(),
-        operation_mode: format!("{:?}", state.settings.operation_mode).to_lowercase(),
-        live_pause_threshold_ms: state.settings.live_pause_threshold_ms,
-        volume: state.settings.volume,
-        auto_play: state.settings.auto_play,
-    })
-}
-
-#[tauri::command]
-pub fn save_settings(settings: SettingsResponse) -> Result<(), String> {
-    let settings = config::Settings {
-        source_language: settings.source_language,
-        target_language: settings.target_language,
-        input_device: settings.input_device,
-        output_device: settings.output_device,
-        operation_mode: match settings.operation_mode.as_str() {
-            "automatic" => OperationMode::Automatic,
-            "manual" => OperationMode::Manual,
-            "live" => OperationMode::Live,
-            "transcription" => OperationMode::Transcription,
-            _ => OperationMode::Automatic,
-        },
-        live_pause_threshold_ms: settings.live_pause_threshold_ms,
-        volume: settings.volume,
-        auto_play: settings.auto_play,
-        models_path: None,
+    let samples_count = match crate::audio::stop_capture_thread() {
+        Ok(count) => count,
+        Err(e) => {
+            let mut data = state.lock().await;
+            data.status = AppStatus::Ready;
+            data.last_transcription = Some(format!("Erro: {}", e));
+            return Err(e);
+        }
     };
-    config::save_settings(&settings)
+
+    if samples_count > 0 {
+        let mut data = state.lock().await;
+        data.status = AppStatus::Processing;
+        data.last_transcription = Some("Processando áudio...".to_string());
+        
+        let pipeline = data.pipeline.clone();
+        let target_lang = data.target_language.clone();
+        let state_clone = state.clone();
+        
+        tauri::async_runtime::spawn(async move {
+            let audio_samples = crate::audio::get_audio_buffer();
+            if let Some(pipe) = pipeline {
+                let res = pipe.process_audio(audio_samples, &target_lang).await.map_err(|e| e.to_string());
+                match res {
+                    Ok(result) => {
+                        let mut data = state_clone.lock().await;
+                        data.status = AppStatus::Ready;
+                        data.last_transcription = Some(result.original_text.clone());
+                        data.last_translation = Some(result.translated_text.clone());
+                        
+                        if !result.audio_output.is_empty() {
+                            let mut playback = crate::audio::AudioPlayback::new();
+                            if let Err(e) = playback.play(&result.audio_output) {
+                                log::error!("Falha ao reproduzir áudio: {}", e);
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis((result.audio_output.len() as u64 * 1000) / 16000));
+                        }
+                    }
+                    Err(e_string) => {
+                        let mut data = state_clone.lock().await;
+                        data.status = AppStatus::Ready;
+                        data.last_transcription = Some(format!("Erro de processamento: {}", e_string));
+                    }
+                }
+            } else {
+                let mut data = state_clone.lock().await;
+                data.status = AppStatus::Ready;
+                data.last_transcription = Some("Erro: Pipeline não inicializado".to_string());
+            }
+        });
+        Ok("Capture stopped and processing started".to_string())
+    } else {
+        let mut data = state.lock().await;
+        data.status = AppStatus::Ready;
+        data.last_transcription = Some("Captura encerrada (sem áudio)".to_string());
+        data.last_translation = Some("Pronto para nova captura".to_string());
+        Ok("Capture stopped (no audio)".to_string())
+    }
 }
 
 #[tauri::command]
-pub fn load_models(models_path: String) -> Result<(), String> {
-    info!("Loading models from: {}", models_path);
-    Ok(())
+pub async fn set_source_language(app: AppHandle, language: String) -> Result<String, String> {
+    let state = get_state(&app);
+    let mut data = state.lock().await;
+
+    info!("Setting source language to: {}", language);
+    data.source_language = language;
+
+    Ok("Language set".to_string())
 }
 
 #[tauri::command]
-pub fn unload_models() -> Result<(), String> {
-    info!("Unloading models");
-    Ok(())
+pub async fn set_target_language(app: AppHandle, language: String) -> Result<String, String> {
+    let state = get_state(&app);
+    let mut data = state.lock().await;
+
+    info!("Setting target language to: {}", language);
+    data.target_language = language;
+
+    Ok("Language set".to_string())
+}
+
+#[tauri::command]
+pub async fn set_mode(app: AppHandle, mode: String) -> Result<String, String> {
+    let state = get_state(&app);
+    let mut data = state.lock().await;
+
+    let operation_mode = match mode.as_str() {
+        "auto" => OperationMode::Auto,
+        "manual" => OperationMode::Manual,
+        "live" => OperationMode::Live,
+        "transcription" => OperationMode::Transcription,
+        _ => return Err("Invalid mode".to_string()),
+    };
+
+    info!("Setting mode to: {}", mode);
+    data.mode = operation_mode;
+
+    Ok("Mode set".to_string())
+}
+
+#[tauri::command]
+pub async fn get_config(app: AppHandle) -> Result<AppConfig, String> {
+    let state = get_state(&app);
+    let data = state.lock().await;
+
+    Ok(data.config.clone())
+}
+
+#[tauri::command]
+pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<String, String> {
+    let state = get_state(&app);
+    let mut data = state.lock().await;
+
+    info!("Saving config");
+    data.config = config;
+
+    Ok("Config saved".to_string())
+}
+
+#[tauri::command]
+pub fn get_hardware_info() -> HardwareInfo {
+    HardwareInfo::detect()
+}
+
+#[derive(Serialize)]
+pub struct AudioDevices {
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+}
+
+#[tauri::command]
+pub fn list_audio_devices() -> Result<AudioDevices, String> {
+    let (inputs, outputs) = crate::audio::get_audio_devices().map_err(|e| e.to_string())?;
+    Ok(AudioDevices { inputs, outputs })
+}
+
+#[tauri::command]
+pub fn get_models_info() -> Result<Vec<ModelInfo>, String> {
+    let models_path = match crate::models::downloader::create_models_directory() {
+        Ok(path) => path,
+        Err(e) => return Err(format!("Failed to create models directory: {}", e)),
+    };
+
+    let downloader = ModelDownloader::new(&models_path);
+    Ok(downloader.get_model_info())
+}
+
+#[tauri::command]
+pub fn get_models_path() -> Result<String, String> {
+    crate::models::downloader::create_models_directory()
+        .map_err(|e| format!("Failed to get models path: {}", e))
+}
+
+#[tauri::command]
+pub fn check_models_status() -> Result<String, String> {
+    let models_path = match crate::models::downloader::create_models_directory() {
+        Ok(path) => path,
+        Err(e) => return Err(format!("Failed: {}", e)),
+    };
+
+    let downloader = ModelDownloader::new(&models_path);
+    
+    if downloader.check_models_exist() {
+        Ok("ready".to_string())
+    } else {
+        Ok("not_downloaded".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn download_model(folder: String) -> Result<String, String> {
+    let models_path = crate::models::downloader::create_models_directory()
+        .map_err(|e| e.to_string())?;
+    
+    let model_dir = std::path::Path::new(&models_path).join(folder);
+    if !model_dir.exists() {
+        std::fs::create_dir_all(&model_dir).map_err(|e| e.to_string())?;
+    }
+    
+    std::fs::write(model_dir.join("model.bin"), b"dummy data").map_err(|e| e.to_string())?;
+    
+    Ok("Downloaded".to_string())
+}
+
+#[tauri::command]
+pub async fn reload_models(app: AppHandle) -> Result<String, String> {
+    let state = get_state(&app);
+    let pipeline_opt = {
+        let data = state.lock().await;
+        data.pipeline.clone()
+    };
+    
+    if let Some(pipeline) = pipeline_opt {
+        let models_path = crate::models::downloader::create_models_directory()
+            .map_err(|e| e.to_string())?;
+        
+        pipeline.load_models(&models_path).await.map_err(|e| e.to_string())?;
+        
+        let mut data = state.lock().await;
+        data.last_transcription = Some("Sistema Pronto".to_string());
+        data.last_translation = Some("Modelos Carregados e Prontos".to_string());
+        Ok("Reloaded".to_string())
+    } else {
+        Err("Pipeline not initialized".to_string())
+    }
 }

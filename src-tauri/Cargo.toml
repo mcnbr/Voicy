@@ -1,14 +1,14 @@
 [package]
 name = "voicy"
-version = "0.0.0"
-description = "Transcrição, Tradução e Síntese Vocal em Tempo Real — 100% Local"
-authors = ["mcnbr"]
+version = "0.1.0"
 edition = "2021"
+authors = ["Voicy Team"]
+description = "Transcrição, Tradução e Síntese Vocal em Tempo Real"
 license = "MIT"
 
 [lib]
 name = "voicy_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -16,30 +16,28 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-anyhow = "1"
-thiserror = "1"
 log = "0.4"
 env_logger = "0.11"
-# Audio
+anyhow = "1"
+thiserror = "2"
 cpal = "0.15"
-hound = "3.5"
-rayon = "1.10"
-parking_lot = "0.12"
-once_cell = "1.20"
-dirs = "5"
 
-# ML Models - pure Rust (sem dependências C)
-# whisper-apr = { version = "0.2", default-features = false, features = ["simd", "std"] }
-# llama-gguf = { version = "0.14", default-features = false, features = ["cpu"] }
+candle-core = "0.10"
+candle-transformers = "0.10"
+candle-nn = "0.10"
+hf-hub = "0.3"
+tokenizers = "0.21"
+byteorder = "1"
 
-[features]
-default = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Media_Audio"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+candle-core = { version = "0.10", features = ["cuda"] }
+candle-transformers = { version = "0.10", features = ["cuda"] }
 
 [profile.release]
 panic = "abort"
@@ -47,3 +45,6 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+[profile.dev]
+opt-level = 0
