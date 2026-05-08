@@ -5,8 +5,10 @@ pub struct HardwareInfo {
     pub has_cuda: bool,
     pub gpu_name: Option<String>,
     pub vram_gb: Option<u32>,
+    pub cpu_name: String,
     pub cpu_cores: u32,
     pub ram_gb: u32,
+    pub active_device: String,  // "GPU: <name>" or "CPU: <name>"
 }
 
 impl HardwareInfo {
@@ -22,13 +24,26 @@ impl HardwareInfo {
             .map(|p| p.get() as u32)
             .unwrap_or(4);
         let ram_gb = Self::get_ram_gb();
+        let cpu_name = Self::get_cpu_name();
+
+        let active_device = if has_cuda {
+            if let Some(ref name) = gpu_name {
+                format!("GPU: {}", name)
+            } else {
+                "GPU: NVIDIA (unknown)".to_string()
+            }
+        } else {
+            format!("CPU: {}", cpu_name)
+        };
 
         Self {
             has_cuda,
             gpu_name,
             vram_gb,
+            cpu_name,
             cpu_cores,
             ram_gb,
+            active_device,
         }
     }
 
@@ -81,6 +96,33 @@ impl HardwareInfo {
         (None, None)
     }
 
+    fn get_cpu_name() -> String {
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let output = Command::new("wmic")
+                .args(["cpu", "get", "name", "/value"])
+                .output();
+            if let Ok(output) = output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if line.starts_with("Name=") {
+                        let name = line.trim_start_matches("Name=").trim().to_string();
+                        if !name.is_empty() {
+                            return name;
+                        }
+                    }
+                }
+            }
+            "Unknown CPU".to_string()
+        }
+
+        #[cfg(not(windows))]
+        {
+            "Unknown CPU".to_string()
+        }
+    }
+
     fn get_ram_gb() -> u32 {
         #[cfg(windows)]
         {
@@ -98,7 +140,7 @@ impl HardwareInfo {
                             .nth(1)
                             .and_then(|s| s.trim().parse().ok())
                             .unwrap_or(0);
-                        return (kb / 1024) as u32;
+                        return (kb / 1024 / 1024) as u32;
                     }
                 }
             }

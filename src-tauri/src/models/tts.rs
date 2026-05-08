@@ -29,10 +29,10 @@ impl TtsModel {
         }
         
         {
-            let device = if cfg!(target_os = "linux") || cfg!(feature = "cuda") {
-                DeviceSpec::Cuda(0)
-            } else {
-                DeviceSpec::Cpu
+            // Probe CUDA at runtime — DeviceSpec::Cuda will be used if a GPU is found
+            let device = match candle_core::Device::new_cuda(0) {
+                Ok(_) => { info!("TTS: Using CUDA GPU"); DeviceSpec::Cuda(0) }
+                Err(_) => { info!("TTS: Using CPU"); DeviceSpec::Cpu }
             };
             
             let options = RuntimeOptions::new(model_dir.clone())

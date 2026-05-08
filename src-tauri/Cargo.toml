@@ -36,6 +36,9 @@ omnivoice-infer = { git = "https://github.com/FerrisMind/omnivoice-rs.git" }
 
 
 
+[features]
+cuda = ["candle-core/cuda", "candle-transformers/cuda", "candle-nn/cuda"]
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Media_Audio"] }
 

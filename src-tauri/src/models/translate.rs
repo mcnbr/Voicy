@@ -22,7 +22,10 @@ impl TranslatorModel {
         // Ensure the model directory exists
         std::fs::create_dir_all(&model_dir)?;
         
-        let device = candle_core::Device::Cpu;
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => { info!("Translator: Using CUDA GPU"); d }
+            Err(_) => { info!("Translator: Using CPU"); candle_core::Device::Cpu }
+        };
         
         info!("Downloading/Loading TinyLlama 1.1B via HuggingFace Hub...");
         let api = ApiBuilder::new().build()?;

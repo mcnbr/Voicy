@@ -30,7 +30,17 @@ impl WhisperModel {
         // Ensure the model directory exists
         std::fs::create_dir_all(&model_dir)?;
         
-        let device = candle_core::Device::Cpu;
+        // Try CUDA first, fall back to CPU gracefully
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => {
+                info!("Whisper: Using CUDA GPU (device 0)");
+                d
+            }
+            Err(e) => {
+                info!("Whisper: CUDA not available ({}), falling back to CPU", e);
+                candle_core::Device::Cpu
+            }
+        };
         
         let mel_bytes = include_bytes!("melfilters128.bytes").as_slice();
         let mut mel_filters = vec![0f32; mel_bytes.len() / 4];

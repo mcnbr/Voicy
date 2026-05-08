@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useWebSocket } from './hooks/useWebSocket';
 
 function App() {
@@ -28,6 +29,12 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
   const hiddenAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const [hwInfo, setHwInfo] = useState<{ active_device: string; has_cuda: boolean; gpu_name?: string; vram_gb?: number; cpu_name: string; cpu_cores: number; ram_gb: number } | null>(null);
+
+  useEffect(() => {
+    invoke('get_hardware_info').then((info: any) => setHwInfo(info)).catch(console.error);
+  }, []);
 
   const {
     isConnected,
@@ -335,6 +342,30 @@ function App() {
                  @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
                `}</style>
            </div>
+
+           {/* Hardware Badge */}
+           {hwInfo && (
+             <div style={{
+               display: 'flex', alignItems: 'center', gap: '8px',
+               padding: '8px 12px', borderRadius: '8px',
+               background: hwInfo.has_cuda ? 'rgba(48,209,88,0.1)' : 'rgba(255,255,255,0.05)',
+               border: `1px solid ${hwInfo.has_cuda ? 'rgba(48,209,88,0.3)' : 'rgba(255,255,255,0.1)'}`,
+               marginBottom: '12px', fontSize: '0.78rem', fontFamily: 'monospace'
+             }}>
+               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={hwInfo.has_cuda ? '#30d158' : '#8e8e93'} strokeWidth="2">
+                 <rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/>
+               </svg>
+               <span style={{ color: hwInfo.has_cuda ? '#30d158' : '#8e8e93', fontWeight: 600 }}>
+                 {hwInfo.active_device}
+               </span>
+               {hwInfo.vram_gb && (
+                 <span style={{ color: '#636366', marginLeft: '4px' }}>· {hwInfo.vram_gb}GB VRAM</span>
+               )}
+               <span style={{ color: '#636366', marginLeft: 'auto' }}>
+                 {hwInfo.cpu_cores}T · {hwInfo.ram_gb}GB RAM
+               </span>
+             </div>
+           )}
 
            <button
               className={`action-btn ${isRecording ? 'recording' : ''}`}
