@@ -15,6 +15,7 @@ pub fn token_id(tokenizer: &Tokenizer, token: &str) -> candle_core::Result<u32> 
 
 pub struct WhisperModel {
     device: Device,
+    device_name: String,
     model: Mutex<Option<m::quantized_model::Whisper>>,
     tokenizer: Option<Tokenizer>,
     config: Option<Config>,
@@ -31,14 +32,14 @@ impl WhisperModel {
         std::fs::create_dir_all(&model_dir)?;
         
         // Try CUDA first, fall back to CPU gracefully
-        let device = match candle_core::Device::new_cuda(0) {
+        let (device, device_name) = match candle_core::Device::new_cuda(0) {
             Ok(d) => {
                 info!("Whisper: Using CUDA GPU (device 0)");
-                d
+                (d, "GPU".to_string())
             }
             Err(e) => {
-                info!("Whisper: CUDA not available ({}), falling back to CPU", e);
-                candle_core::Device::Cpu
+                info!("Whisper: CUDA not available ({}), using CPU", e);
+                (candle_core::Device::Cpu, crate::hardware::HardwareInfo::detect_cpu_name())
             }
         };
         
@@ -69,6 +70,7 @@ impl WhisperModel {
             info!("Whisper model successfully loaded!");
             return Ok(Self {
                 device,
+                device_name: device_name.clone(),
                 model: Mutex::new(Some(model)),
                 tokenizer: Some(tokenizer),
                 config: Some(config),
@@ -80,12 +82,17 @@ impl WhisperModel {
         warn!("Whisper model files not available yet. Using placeholder mode.");
         Ok(Self {
             device,
+            device_name,
             model: Mutex::new(None),
             tokenizer: None,
             config: None,
             mel_filters,
             loaded: false,
         })
+    }
+
+    pub fn device_name(&self) -> &str {
+        &self.device_name
     }
     
     pub fn transcribe(&self, audio_samples: &[f32]) -> Result<String> {

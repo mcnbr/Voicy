@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub struct Pipeline {
-    model_manager: Arc<tokio::sync::Mutex<ModelManager>>,
+    pub model_manager: Arc<tokio::sync::Mutex<ModelManager>>,
     audio_receiver: Option<mpsc::Receiver<Vec<f32>>>,
 }
 

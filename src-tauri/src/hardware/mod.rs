@@ -96,6 +96,10 @@ impl HardwareInfo {
         (None, None)
     }
 
+    pub fn detect_cpu_name() -> String {
+        Self::get_cpu_name()
+    }
+
     fn get_cpu_name() -> String {
         #[cfg(windows)]
         {

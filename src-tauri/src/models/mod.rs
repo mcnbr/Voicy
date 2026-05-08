@@ -59,6 +59,14 @@ impl ModelManager {
         self.tts.as_ref()
     }
 
+    /// Returns the device name actually used by the primary model (Whisper)
+    pub fn get_active_device(&self) -> String {
+        self.whisper
+            .as_ref()
+            .map(|w| w.device_name().to_string())
+            .unwrap_or_else(|| "CPU".to_string())
+    }
+
     pub fn unload(&mut self) {
         self.whisper = None;
         self.translator = None;

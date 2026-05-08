@@ -218,6 +218,18 @@ pub fn get_audio_levels() -> Vec<f32> {
     crate::audio::get_audio_levels().to_vec()
 }
 
+#[tauri::command]
+pub async fn get_active_device(app: AppHandle) -> String {
+    let state = get_state(&app);
+    let data = state.lock().await;
+    if let Some(pipe) = &data.pipeline {
+        let manager = pipe.model_manager.lock().await;
+        manager.get_active_device()
+    } else {
+        crate::hardware::HardwareInfo::detect_cpu_name()
+    }
+}
+
 #[derive(Serialize)]
 pub struct AudioDevices {
     inputs: Vec<String>,

@@ -30,10 +30,16 @@ function App() {
   const animFrameRef = useRef<number>(0);
   const hiddenAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const [hwInfo, setHwInfo] = useState<{ active_device: string; has_cuda: boolean; gpu_name?: string; vram_gb?: number; cpu_name: string; cpu_cores: number; ram_gb: number } | null>(null);
+  const [activeDevice, setActiveDevice] = useState<string | null>(null);
 
   useEffect(() => {
-    invoke('get_hardware_info').then((info: any) => setHwInfo(info)).catch(console.error);
+    // Poll actual device name from backend (updates after models load)
+    const fetchDevice = () => {
+      invoke<string>('get_active_device').then(setActiveDevice).catch(() => {});
+    };
+    fetchDevice();
+    const t = setInterval(fetchDevice, 3000);
+    return () => clearInterval(t);
   }, []);
 
   const {
@@ -343,27 +349,18 @@ function App() {
                `}</style>
            </div>
 
-           {/* Hardware Badge */}
-           {hwInfo && (
+           {/* Active Device Chip */}
+           {activeDevice && (
              <div style={{
-               display: 'flex', alignItems: 'center', gap: '8px',
-               padding: '8px 12px', borderRadius: '8px',
-               background: hwInfo.has_cuda ? 'rgba(48,209,88,0.1)' : 'rgba(255,255,255,0.05)',
-               border: `1px solid ${hwInfo.has_cuda ? 'rgba(48,209,88,0.3)' : 'rgba(255,255,255,0.1)'}`,
-               marginBottom: '12px', fontSize: '0.78rem', fontFamily: 'monospace'
+               display: 'inline-flex', alignItems: 'center', gap: '6px',
+               padding: '4px 10px', borderRadius: '999px',
+               background: 'rgba(255,255,255,0.06)',
+               border: '1px solid rgba(255,255,255,0.1)',
+               marginBottom: '12px', fontSize: '0.75rem',
+               color: '#8e8e93', letterSpacing: '0.02em'
              }}>
-               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={hwInfo.has_cuda ? '#30d158' : '#8e8e93'} strokeWidth="2">
-                 <rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/>
-               </svg>
-               <span style={{ color: hwInfo.has_cuda ? '#30d158' : '#8e8e93', fontWeight: 600 }}>
-                 {hwInfo.active_device}
-               </span>
-               {hwInfo.vram_gb && (
-                 <span style={{ color: '#636366', marginLeft: '4px' }}>· {hwInfo.vram_gb}GB VRAM</span>
-               )}
-               <span style={{ color: '#636366', marginLeft: 'auto' }}>
-                 {hwInfo.cpu_cores}T · {hwInfo.ram_gb}GB RAM
-               </span>
+               <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: activeDevice.startsWith('GPU') ? '#30d158' : '#636366', flexShrink: 0 }} />
+               {activeDevice}
              </div>
            )}
 
