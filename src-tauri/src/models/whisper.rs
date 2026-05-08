@@ -1,8 +1,6 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use log::{info, warn};
-use std::path::Path;
 use candle_core::{Device, Tensor, IndexOp};
-use candle_nn::ops::softmax;
 use candle_transformers::models::whisper::{self as m, audio, Config};
 use tokenizers::Tokenizer;
 use hf_hub::api::sync::ApiBuilder;
@@ -38,11 +36,7 @@ impl WhisperModel {
         let mut mel_filters = vec![0f32; mel_bytes.len() / 4];
         <byteorder::LittleEndian as byteorder::ByteOrder>::read_f32_into(mel_bytes, &mut mel_filters);
 
-        info!("Downloading/Loading Whisper Large V3 Turbo via HuggingFace Hub...");
-        // Use the model_dir itself as the HF cache directory
-        let api = ApiBuilder::new()
-            .with_cache_dir(model_dir.clone())
-            .build()?;
+        let api = ApiBuilder::new().build()?;
         let repo_gguf = api.model("oxide-lab/whisper-large-v3-turbo-GGUF".to_string());
         let repo_orig = api.model("openai/whisper-large-v3-turbo".to_string());
         

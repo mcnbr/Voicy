@@ -1,6 +1,5 @@
 use anyhow::Result;
 use log::{info, warn};
-use std::path::Path;
 use std::sync::Mutex;
 
 use omnivoice_infer::pipeline::Phase3Pipeline;

@@ -1,6 +1,5 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use log::{info, warn};
-use std::path::Path;
 use candle_core::{Device, Tensor};
 use tokenizers::Tokenizer;
 use hf_hub::api::sync::ApiBuilder;
@@ -26,9 +25,7 @@ impl TranslatorModel {
         let device = candle_core::Device::Cpu;
         
         info!("Downloading/Loading TinyLlama 1.1B via HuggingFace Hub...");
-        let api = ApiBuilder::new()
-            .with_cache_dir(model_dir.clone())
-            .build()?;
+        let api = ApiBuilder::new().build()?;
         
         let repo = api.model("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string());
         let tokenizer_repo = api.model("TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string());
@@ -86,7 +83,7 @@ impl TranslatorModel {
         info!("Translating from {} to {}: {}", source_lang, target_lang, text);
         
         let tgt_name = get_language_mapping(target_lang);
-        let src_name = if source_lang == "auto" { "auto" } else { get_language_mapping(source_lang) };
+        let _src_name = if source_lang == "auto" { "auto" } else { get_language_mapping(source_lang) };
         
         let prompt = format!("<|system|>\nYou are a professional translator.\n<|user|>\nTranslate this text to {}. Only output the translation, nothing else.\n\n{}\n<|assistant|>\n", tgt_name, text);
         
