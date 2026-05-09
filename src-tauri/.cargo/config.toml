@@ -1,2 +1,2 @@
-[build]
-rustflags = []
+[env]
+CUDA_NVCC_FLAGS = { value = "--allow-unsupported-compiler", force = true }
