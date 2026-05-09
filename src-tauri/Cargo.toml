@@ -25,26 +25,28 @@ anyhow = "1"
 thiserror = "2"
 cpal = "0.15"
 
-candle-core = "0.10"
-candle-transformers = "0.10"
-candle-nn = "0.10"
+candle-core = { git = "https://github.com/huggingface/candle.git" }
+candle-transformers = { git = "https://github.com/huggingface/candle.git" }
+candle-nn = { git = "https://github.com/huggingface/candle.git" }
 hf-hub = "0.3"
 tokenizers = "0.21"
 byteorder = "1"
-omnivoice-infer = { git = "https://github.com/FerrisMind/omnivoice-rs.git" }
+omnivoice-infer = { git = "https://github.com/FerrisMind/omnivoice-rs.git", features = ["cuda"], optional = true }
 
 
 
 
 [features]
-cuda = ["candle-core/cuda", "candle-transformers/cuda", "candle-nn/cuda"]
+default = ["cuda"]
+cuda = ["candle-core/cuda", "candle-transformers/cuda", "candle-nn/cuda", "dep:omnivoice-infer"]
+tts = ["dep:omnivoice-infer"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Media_Audio"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-candle-core = { version = "0.10", features = ["cuda"] }
-candle-transformers = { version = "0.10", features = ["cuda"] }
+candle-core = { git = "https://github.com/huggingface/candle.git", features = ["cuda"] }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", features = ["cuda"] }
 
 [profile.release]
 panic = "abort"
@@ -55,3 +57,8 @@ strip = true
 
 [profile.dev]
 opt-level = 0
+
+[patch.crates-io]
+candle-core = { git = "https://github.com/huggingface/candle.git" }
+candle-nn = { git = "https://github.com/huggingface/candle.git" }
+candle-transformers = { git = "https://github.com/huggingface/candle.git" }

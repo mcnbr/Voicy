@@ -25,33 +25,46 @@ impl Pipeline {
         self.audio_receiver = Some(receiver);
     }
 
-    pub async fn process_audio(&self, audio: Vec<f32>, target_lang: &str) -> Result<PipelineResult, Box<dyn std::error::Error>> {
+    pub async fn process_audio(&self, audio: Vec<f32>, source_lang: &str, target_lang: &str) -> Result<PipelineResult, Box<dyn std::error::Error>> {
         let manager = self.model_manager.lock().await;
 
         info!("Pipeline: Starting audio processing");
 
+        let start = std::time::Instant::now();
         let transcription = if let Some(whisper) = manager.get_whisper() {
-            whisper.transcribe(&audio)?
+            whisper.transcribe(&audio, source_lang)?
         } else {
             "No whisper model loaded".to_string()
         };
+        let stt_time = start.elapsed().as_millis() as u32;
 
-        let translation = if let Some(translator) = manager.get_translator() {
-            translator.translate(&transcription, "auto", target_lang)?
+        let start = std::time::Instant::now();
+        let translation = if transcription.trim().is_empty() {
+            String::new()
+        } else if let Some(translator) = manager.get_translator() {
+            translator.translate(&transcription, source_lang, target_lang)?
         } else {
             "No translator model loaded".to_string()
         };
+        let translation_time = start.elapsed().as_millis() as u32;
 
+        let ref_audio = crate::audio::get_last_recording_for_tts();
+
+        let start = std::time::Instant::now();
         let audio_output = if let Some(tts) = manager.get_tts() {
-            tts.synthesize(&translation)?
+            tts.synthesize(&translation, ref_audio)?
         } else {
             Vec::new()
         };
+        let tts_time = start.elapsed().as_millis() as u32;
 
         Ok(PipelineResult {
             original_text: transcription,
             translated_text: translation,
             audio_output,
+            stt_time,
+            translation_time,
+            tts_time,
         })
     }
 
@@ -71,4 +84,7 @@ pub struct PipelineResult {
     pub original_text: String,
     pub translated_text: String,
     pub audio_output: Vec<f32>,
+    pub stt_time: u32,
+    pub translation_time: u32,
+    pub tts_time: u32,
 }

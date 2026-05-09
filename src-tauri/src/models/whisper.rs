@@ -24,6 +24,42 @@ pub struct WhisperModel {
 }
 
 impl WhisperModel {
+    fn load_with_path(config_path: Option<std::path::PathBuf>, tokenizer_path: Option<std::path::PathBuf>, weights_path: Option<std::path::PathBuf>, models_path: &str, device: Device, device_name: String, mel_filters: Vec<f32>) -> Result<Self> {
+        let model_dir = std::path::Path::new(models_path).join("whisper-large-v3-turbo");
+        
+        if let (Some(cp), Some(tp), Some(wp)) = (config_path, tokenizer_path, weights_path) {
+            info!("All files available. Parsing configuration...");
+            let config: Config = serde_json::from_str(&std::fs::read_to_string(cp)?)?;
+            let tokenizer = Tokenizer::from_file(tp).map_err(|e| anyhow::anyhow!(e))?;
+            
+            info!("Loading tensors into device ({:?})...", device);
+            let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&wp, &device)?;
+            let model = m::quantized_model::Whisper::load(&vb, config.clone())?;
+            
+            info!("Whisper model successfully loaded!");
+            return Ok(Self {
+                device,
+                device_name: device_name.clone(),
+                model: Mutex::new(Some(model)),
+                tokenizer: Some(tokenizer),
+                config: Some(config),
+                mel_filters,
+                loaded: true,
+            });
+        }
+        
+        warn!("Whisper model files not available yet. Using placeholder mode.");
+        Ok(Self {
+            device,
+            device_name,
+            model: Mutex::new(None),
+            tokenizer: None,
+            config: None,
+            mel_filters,
+            loaded: false,
+        })
+    }
+
     pub fn new(models_path: &str) -> Result<Self> {
         let model_dir = std::path::Path::new(models_path).join("whisper-large-v3-turbo");
         info!("Initializing Whisper model from: {:?}", model_dir);
@@ -48,20 +84,23 @@ impl WhisperModel {
         <byteorder::LittleEndian as byteorder::ByteOrder>::read_f32_into(mel_bytes, &mut mel_filters);
 
         let api = ApiBuilder::new().build()?;
-        let repo_gguf = api.model("oxide-lab/whisper-large-v3-turbo-GGUF".to_string());
+        
+        let repo_gguf = api.model("Xviers/whisper-large-v3-turbo-GGUF".to_string());
         let repo_orig = api.model("openai/whisper-large-v3-turbo".to_string());
         
-        info!("Fetching config.json...");
+        info!("Fetching config.json from openai/whisper-large-v3-turbo...");
         let config_path = repo_orig.get("config.json").map_err(|e| { warn!("Failed to get config.json: {}", e); e }).ok();
-        info!("Fetching tokenizer.json...");
+        
+        info!("Fetching tokenizer.json from openai/whisper-large-v3-turbo...");
         let tokenizer_path = repo_orig.get("tokenizer.json").map_err(|e| { warn!("Failed to get tokenizer.json: {}", e); e }).ok();
-        info!("Fetching weights (this might take a while)...");
-        let weights_path = repo_gguf.get("whisper-large-v3-turbo-q4_0.gguf").map_err(|e| { warn!("Failed to get gguf: {}", e); e }).ok();
+        
+        info!("Fetching weights from Xviers/whisper-large-v3-turbo-GGUF (this might take a while)...");
+        let weights_path = repo_gguf.get("whisper-large-v3-turbo-q8_0.gguf").map_err(|e| { warn!("Failed to get gguf: {}", e); e }).ok();
         
         if let (Some(cp), Some(tp), Some(wp)) = (config_path, tokenizer_path, weights_path) {
             info!("All files downloaded. Parsing configuration...");
-            let config: Config = serde_json::from_str(&std::fs::read_to_string(&cp)?)?;
-            let tokenizer = Tokenizer::from_file(&tp).map_err(|e| anyhow::anyhow!(e))?;
+            let config: Config = serde_json::from_str(&std::fs::read_to_string(cp.clone())?)?;
+            let tokenizer = Tokenizer::from_file(tp.clone()).map_err(|e| anyhow::anyhow!(e))?;
             
             info!("Loading tensors into device ({:?})...", device);
             let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&wp, &device)?;
@@ -95,7 +134,7 @@ impl WhisperModel {
         &self.device_name
     }
     
-    pub fn transcribe(&self, audio_samples: &[f32]) -> Result<String> {
+    pub fn transcribe(&self, audio_samples: &[f32], source_lang: &str) -> Result<String> {
         if !self.loaded {
             return Ok("[Transcrição] Modelo Whisper não carregado. Baixe o modelo para ativar.".to_string());
         }
@@ -103,8 +142,16 @@ impl WhisperModel {
         if audio_samples.is_empty() {
             return Ok(String::new());
         }
+
+        // Prevent hallucinations on silent audio
+        let sum_abs: f32 = audio_samples.iter().map(|&x| x.abs()).sum();
+        let avg_vol = sum_abs / audio_samples.len() as f32;
+        if avg_vol < 0.001 {
+            info!("Audio too quiet (vol: {:.5}), skipping transcription to prevent hallucination.", avg_vol);
+            return Ok(String::new());
+        }
         
-        info!("Transcribing {} audio samples", audio_samples.len());
+        info!("Transcribing {} audio samples (vol: {:.5})", audio_samples.len(), avg_vol);
         let config = self.config.as_ref().unwrap();
         let tokenizer = self.tokenizer.as_ref().unwrap();
         
@@ -121,9 +168,16 @@ impl WhisperModel {
         
         let audio_features = model.encoder.forward(&mel, true)?;
         
+            let lang_token = if source_lang == "auto" {
+                token_id(tokenizer, m::SOT_TOKEN)?
+            } else {
+                let token_str = format!("<|{}|>", source_lang);
+                token_id(tokenizer, &token_str).unwrap_or(token_id(tokenizer, m::SOT_TOKEN)?)
+            };
+            
         let mut tokens = vec![
             token_id(tokenizer, m::SOT_TOKEN)?,
-            token_id(tokenizer, "<|pt|>").unwrap_or(token_id(tokenizer, m::SOT_TOKEN)?),
+            lang_token,
             token_id(tokenizer, m::TRANSCRIBE_TOKEN)?,
             token_id(tokenizer, m::NO_TIMESTAMPS_TOKEN)?,
         ];

@@ -104,18 +104,13 @@ impl HardwareInfo {
         #[cfg(windows)]
         {
             use std::process::Command;
-            let output = Command::new("wmic")
-                .args(["cpu", "get", "name", "/value"])
+            let output = Command::new("powershell")
+                .args(["-NoProfile", "-Command", "(Get-ItemProperty 'HKLM:\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0').ProcessorNameString"])
                 .output();
             if let Ok(output) = output {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if line.starts_with("Name=") {
-                        let name = line.trim_start_matches("Name=").trim().to_string();
-                        if !name.is_empty() {
-                            return name;
-                        }
-                    }
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !stdout.is_empty() {
+                    return stdout;
                 }
             }
             "Unknown CPU".to_string()

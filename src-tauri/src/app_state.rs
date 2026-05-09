@@ -33,7 +33,11 @@ pub struct AppStateData {
     pub config: AppConfig,
     pub last_transcription: Option<String>,
     pub last_translation: Option<String>,
+    pub last_audio: Option<Vec<f32>>,
     pub pipeline: Option<Arc<crate::pipeline::Pipeline>>,
+    pub stt_time: u32,
+    pub translation_time: u32,
+    pub tts_time: u32,
 }
 
 impl Default for AppStateData {
@@ -47,7 +51,11 @@ impl Default for AppStateData {
             config: AppConfig::default(),
             last_transcription: Some("Carregando modelos...".to_string()),
             last_translation: Some("Aguarde...".to_string()),
+            last_audio: None,
             pipeline: None,
+            stt_time: 0,
+            translation_time: 0,
+            tts_time: 0,
         }
     }
 }

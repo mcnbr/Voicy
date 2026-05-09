@@ -211,18 +211,29 @@ function App() {
     return () => cancelAnimationFrame(animFrameRef.current);
   }, [audioLevels, isRecording]);
 
+  // Track audio by unique ID to prevent re-triggering
+  const lastAudioIdRef = useRef<string>('');
+
   // Fetch last generated audio as blob URL when translation is done
   useEffect(() => {
     if (lastTranslation && ttsTime?.status === 'done' && ttsTime.duration_ms > 0) {
-      fetch('http://127.0.0.1:8765/api/last-audio.wav')
-        .then(res => res.blob())
-        .then(blob => {
-          const url = URL.createObjectURL(blob);
-          setAudioUrl(url);
-        })
-        .catch(() => setAudioUrl(null));
+      const audioId = `${lastTranslation.text}-${ttsTime.duration_ms}`;
+      if (audioId !== lastAudioIdRef.current) {
+        lastAudioIdRef.current = audioId;
+        invoke<number[]>('get_last_audio')
+          .then(bytes => {
+            const blob = new Blob([new Uint8Array(bytes)], { type: 'audio/wav' });
+            const url = URL.createObjectURL(blob);
+            setAudioUrl(url);
+            // Auto-play in auto mode
+            if (outputMode === 'auto' && hiddenAudioRef.current) {
+              hiddenAudioRef.current.play().catch(() => {});
+            }
+          })
+          .catch(() => setAudioUrl(null));
+      }
     }
-  }, [lastTranslation, ttsTime]);
+  }, [lastTranslation, ttsTime, outputMode]);
 
   // Cleanup blob URL when it changes or on unmount
   useEffect(() => {

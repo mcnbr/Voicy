@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use std::sync::atomic::AtomicU32;
+
 static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static INPUT_SAMPLE_RATE: AtomicU32 = AtomicU32::new(48000);
 
 // Persistent audio buffer — accumulates ALL samples during recording
 static AUDIO_BUFFER: Mutex<Option<Arc<Mutex<Vec<f32>>>>> = Mutex::new(None);
@@ -41,15 +44,49 @@ pub fn get_audio_buffer_samples() -> usize {
     0
 }
 
+fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+    if in_rate == out_rate || input.is_empty() {
+        return input.to_vec();
+    }
+    let ratio = in_rate as f32 / out_rate as f32;
+    let out_len = (input.len() as f32 / ratio).round() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let in_idx = i as f32 * ratio;
+        let idx_floor = in_idx.floor() as usize;
+        let idx_ceil = (idx_floor + 1).min(input.len() - 1);
+        let weight = in_idx - idx_floor as f32;
+        let sample = input[idx_floor] * (1.0 - weight) + input[idx_ceil] * weight;
+        out.push(sample);
+    }
+    out
+}
+
 pub fn get_audio_buffer() -> Vec<f32> {
     if let Ok(guard) = AUDIO_BUFFER.lock() {
         if let Some(buffer) = guard.as_ref() {
             if let Ok(buf) = buffer.lock() {
-                return buf.clone();
+                let in_rate = INPUT_SAMPLE_RATE.load(Ordering::SeqCst);
+                return resample_linear(&buf, in_rate, 16000);
             }
         }
     }
     Vec::new()
+}
+
+pub fn get_last_recording_for_tts() -> Option<Vec<f32>> {
+    if let Ok(guard) = AUDIO_BUFFER.lock() {
+        if let Some(buffer) = guard.as_ref() {
+            if let Ok(buf) = buffer.lock() {
+                if buf.len() > 16000 {
+                    let in_rate = INPUT_SAMPLE_RATE.load(Ordering::SeqCst);
+                    let samples_24k = resample_linear(&buf, in_rate, 24000);
+                    return Some(samples_24k);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn get_audio_levels() -> [f32; 32] {
@@ -85,20 +122,21 @@ pub fn start_capture_thread() -> Result<(), String> {
     }
 
     let host = cpal::default_host();
-    let device = match host.default_input_device() {
-        Some(d) => d,
-        None => return Err("No input device available".to_string()),
-    };
-
-    info!("Using audio device: {:?}", device.name());
-
-    let config = match device.default_input_config() {
-        Ok(c) => c,
-        Err(e) => return Err(format!("Failed to get default config: {}", e)),
-    };
-
-    let sample_rate = config.sample_rate().0;
+    
+    let device = host.default_input_device()
+        .ok_or_else(|| "No default input device found".to_string())?;
+        
+    info!("Found audio input device: {:?}", device.name().unwrap_or_default());
+    
+    let config = device.default_input_config()
+        .map_err(|e| format!("Failed to get default input config: {}", e))?;
+        
+    info!("Audio config: {} Hz, {} channels", config.sample_rate().0, config.channels());
+    
+    INPUT_SAMPLE_RATE.store(config.sample_rate().0, Ordering::SeqCst);
+    
     let channels = config.channels() as usize;
+    let sample_rate = config.sample_rate().0;
     info!("Audio config: {} Hz, {} channels", sample_rate, channels);
 
     let buffer = {

@@ -1,98 +1,197 @@
 use anyhow::Result;
 use log::{info, warn};
 use std::sync::Mutex;
+use std::fs;
+use std::io::Write;
 
+#[cfg(feature = "cuda")]
 use omnivoice_infer::pipeline::Phase3Pipeline;
-use omnivoice_infer::contracts::GenerationRequest;
+#[cfg(feature = "cuda")]
+use omnivoice_infer::contracts::{GenerationRequest, ReferenceAudioInput};
+#[cfg(feature = "cuda")]
 use omnivoice_infer::runtime::{RuntimeOptions, DeviceSpec};
+#[cfg(feature = "cuda")]
+use omnivoice_infer::model_source::resolve_tts_model_root_from_path;
 
 pub struct TtsModel {
+    #[cfg(feature = "cuda")]
     pipeline: Mutex<Option<Phase3Pipeline>>,
+    #[cfg(not(feature = "cuda"))]
+    _unused: (),
     loaded: bool,
     sample_rate: u32,
 }
 
 impl TtsModel {
+    #[cfg(feature = "cuda")]
     pub fn new(models_path: &str) -> Result<Self> {
-        let model_dir = std::path::Path::new(models_path).join("omnivoice");
-        info!("Initializing TTS model from: {:?}", model_dir);
-        
-        let has_model = model_dir.join("omnivoice.artifacts.json").exists();
-        
-        if !has_model {
-            warn!("TTS model not found at: {:?}. Using placeholder audio.", model_dir);
-            return Ok(Self {
-                pipeline: Mutex::new(None),
-                loaded: false,
-                sample_rate: 24000,
-            });
-        }
-        
-        {
-            // Probe CUDA at runtime — DeviceSpec::Cuda will be used if a GPU is found
-            let device = match candle_core::Device::new_cuda(0) {
-                Ok(_) => { info!("TTS: Using CUDA GPU"); DeviceSpec::Cuda(0) }
-                Err(_) => { info!("TTS: Using CPU"); DeviceSpec::Cpu }
-            };
-            
-            let options = RuntimeOptions::new(model_dir.clone())
-                .with_device(device);
-                
-            match Phase3Pipeline::from_options(options) {
-                Ok(pipeline) => {
-                    info!("TTS model found and loaded");
+        let local_dir = std::path::Path::new(models_path).join("omnivoice");
+        info!("Checking for local OmniVoice model at: {:?}", local_dir);
+
+        let model_root = if local_dir.join("omnivoice.artifacts.json").exists() {
+            info!("Local OmniVoice model found, using it.");
+            local_dir
+        } else {
+            info!("Local OmniVoice model not found. Auto-downloading from HuggingFace (k2-fsa/OmniVoice)...");
+            match resolve_tts_model_root_from_path(None) {
+                Ok(path) => {
+                    info!("OmniVoice model downloaded to: {:?}", path);
+                    path
+                }
+                Err(e) => {
+                    warn!("Failed to auto-download OmniVoice model: {}. TTS will use placeholder audio.", e);
                     return Ok(Self {
-                        pipeline: Mutex::new(Some(pipeline)),
-                        loaded: true,
+                        pipeline: Mutex::new(None),
+                        loaded: false,
                         sample_rate: 24000,
                     });
                 }
-                Err(e) => {
-                    warn!("Failed to load OmniVoice pipeline, keeping stub: {}", e);
-                }
+            }
+        };
+
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(_) => { info!("TTS: Using CUDA GPU"); DeviceSpec::Cuda(0) }
+            Err(_) => { info!("TTS: Using CPU"); DeviceSpec::Cpu }
+        };
+
+        let options = RuntimeOptions::new(model_root).with_device(device);
+
+        match Phase3Pipeline::from_options(options) {
+            Ok(pipeline) => {
+                info!("OmniVoice TTS pipeline loaded successfully.");
+                Ok(Self {
+                    pipeline: Mutex::new(Some(pipeline)),
+                    loaded: true,
+                    sample_rate: 24000,
+                })
+            }
+            Err(e) => {
+                warn!("Failed to load OmniVoice pipeline: {}. TTS will use placeholder audio.", e);
+                Ok(Self {
+                    pipeline: Mutex::new(None),
+                    loaded: false,
+                    sample_rate: 24000,
+                })
             }
         }
+    }
 
+    #[cfg(not(feature = "cuda"))]
+    pub fn new(models_path: &str) -> Result<Self> {
+        warn!("TTS requires the 'cuda' feature. Building without TTS support.");
+        let _ = models_path;
         Ok(Self {
-            pipeline: Mutex::new(None),
+            _unused: (),
             loaded: false,
             sample_rate: 24000,
         })
     }
-    
-    pub fn synthesize(&self, text: &str) -> Result<Vec<f32>> {
+
+    #[cfg(feature = "cuda")]
+    pub fn synthesize(&self, text: &str, ref_audio: Option<Vec<f32>>) -> Result<Vec<f32>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
-        
+
         if !self.loaded {
-            info!("TTS model not loaded, returning silence");
-            return Ok(self.generate_placeholder_audio(24000));
+            info!("TTS model not loaded, returning placeholder audio");
+            let word_count = text.split_whitespace().count();
+            let duration_secs = (word_count as f32 * 0.15).max(1.0);
+            let num_samples = (self.sample_rate as f32 * duration_secs) as usize;
+            return Ok(self.generate_placeholder_audio(num_samples));
         }
-        
-        info!("Synthesizing text: {}", text);
-        
-        {
-            let req = GenerationRequest::new_text_only(text);
-            let mut pipeline_lock = self.pipeline.lock().unwrap();
-            if let Some(pipeline) = pipeline_lock.as_mut() {
-                let audio_results = pipeline.generate(&req).map_err(|e| anyhow::anyhow!(e))?;
-                
-                if let Some(audio) = audio_results.into_iter().next() {
-                    info!("Synthesis complete: {} samples generated", audio.samples.len());
-                    return Ok(audio.samples);
+
+        info!("Synthesizing {} chars via OmniVoice...", text.len());
+
+        let ref_audio_path = if let Some(ref_samples) = ref_audio {
+            if ref_samples.len() > 16000 {
+                if let Some(path) = self.save_ref_audio(&ref_samples) {
+                    Some(path)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let req = if let Some(ref_path) = ref_audio_path {
+            info!("Using voice cloning with ref audio: {}", ref_path);
+            GenerationRequest::new_text_only(text)
+                .with_ref_audio(ReferenceAudioInput::from_path(ref_path))
+        } else {
+            GenerationRequest::new_text_only(text)
+        };
+
+        let mut pipeline_lock = self.pipeline.lock().unwrap();
+        if let Some(pipeline) = pipeline_lock.as_mut() {
+            match pipeline.generate(&req) {
+                Ok(audio_results) => {
+                    if let Some(audio) = audio_results.into_iter().next() {
+                        info!("OmniVoice synthesis complete: {} samples", audio.samples.len());
+                        return Ok(audio.samples);
+                    }
+                }
+                Err(e) => {
+                    warn!("OmniVoice synthesis error: {}", e);
                 }
             }
         }
-        
+
         let word_count = text.split_whitespace().count();
         let duration_secs = (word_count as f32 * 0.15).max(1.0);
         let num_samples = (self.sample_rate as f32 * duration_secs) as usize;
-        let samples = self.generate_placeholder_audio(num_samples);
-        info!("Synthesis complete: {} placeholder samples generated", samples.len());
-        Ok(samples)
+        Ok(self.generate_placeholder_audio(num_samples))
     }
-    
+
+    #[cfg(feature = "cuda")]
+    fn save_ref_audio(&self, samples: &[f32]) -> Option<String> {
+        let temp_dir = std::env::temp_dir();
+        let ref_path = temp_dir.join("voicy_ref_audio.wav");
+
+        let sample_rate: u32 = 24000;
+        let data_size = samples.len() * 4;
+        let file_size = 36 + data_size as u32;
+
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(b"RIFF");
+        buffer.extend_from_slice(&file_size.to_le_bytes());
+        buffer.extend_from_slice(b"WAVE");
+
+        buffer.extend_from_slice(b"fmt ");
+        buffer.extend_from_slice(&16u32.to_le_bytes());
+        buffer.extend_from_slice(&3u16.to_le_bytes());
+        buffer.extend_from_slice(&1u16.to_le_bytes());
+        buffer.extend_from_slice(&sample_rate.to_le_bytes());
+        buffer.extend_from_slice(&(sample_rate * 4).to_le_bytes());
+        buffer.extend_from_slice(&4u16.to_le_bytes());
+        buffer.extend_from_slice(&32u16.to_le_bytes());
+
+        buffer.extend_from_slice(b"data");
+        buffer.extend_from_slice(&(data_size as u32).to_le_bytes());
+
+        for &sample in samples {
+            buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        if let Ok(mut file) = fs::File::create(&ref_path) {
+            if file.write_all(&buffer).is_ok() {
+                return ref_path.to_str().map(|s| s.to_string());
+            }
+        }
+        None
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub fn synthesize(&self, text: &str, _ref_audio: Option<Vec<f32>>) -> Result<Vec<f32>> {
+        let word_count = text.split_whitespace().count();
+        let duration_secs = (word_count as f32 * 0.15).max(1.0);
+        let num_samples = (self.sample_rate as f32 * duration_secs) as usize;
+        Ok(self.generate_placeholder_audio(num_samples))
+    }
+
     fn generate_placeholder_audio(&self, num_samples: usize) -> Vec<f32> {
         let mut samples = Vec::with_capacity(num_samples);
         for i in 0..num_samples {
@@ -103,11 +202,11 @@ impl TtsModel {
         }
         samples
     }
-    
+
     pub fn is_loaded(&self) -> bool {
         self.loaded
     }
-    
+
     pub fn get_sample_rate(&self) -> u32 {
         self.sample_rate
     }

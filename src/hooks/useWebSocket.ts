@@ -155,11 +155,11 @@ export function useWebSocket(): UseWebSocketReturn {
         
         if (res.status === "processing") {
             setPipelineTelemetry([{ stage: "stt", status: "running", duration_ms: 0 }]);
-        } else if (res.status === "ready" && res.last_translation) {
+        } else if (res.status === "ready" && (res.last_translation || res.last_transcription)) {
             setPipelineTelemetry([
-                { stage: "stt", status: "done", duration_ms: 500 },
-                { stage: "translate", status: "done", duration_ms: 500 },
-                { stage: "tts", status: "done", duration_ms: 500 }
+                { stage: "stt", status: "done", duration_ms: res.stt_time || 0 },
+                { stage: "translate", status: "done", duration_ms: res.translation_time || 0 },
+                { stage: "tts", status: "done", duration_ms: res.tts_time || 0 }
             ]);
         }
       } catch (e) {

@@ -14,6 +14,9 @@ pub struct StatusResponse {
     pub gpu_name: Option<String>,
     pub last_transcription: Option<String>,
     pub last_translation: Option<String>,
+    pub stt_time: u32,
+    pub translation_time: u32,
+    pub tts_time: u32,
 }
 
 #[tauri::command]
@@ -44,6 +47,9 @@ pub async fn get_status(app: AppHandle) -> Result<StatusResponse, String> {
         gpu_name: data.hardware_info.gpu_name.clone(),
         last_transcription: data.last_transcription.clone(),
         last_translation: data.last_translation.clone(),
+        stt_time: data.stt_time,
+        translation_time: data.translation_time,
+        tts_time: data.tts_time,
     })
 }
 
@@ -111,19 +117,24 @@ pub async fn stop_capture(app: AppHandle) -> Result<String, String> {
         data.last_transcription = Some("Processando áudio...".to_string());
         
         let pipeline = data.pipeline.clone();
+        let source_lang = data.source_language.clone();
         let target_lang = data.target_language.clone();
         let state_clone = state.clone();
         
         tauri::async_runtime::spawn(async move {
             let audio_samples = crate::audio::get_audio_buffer();
             if let Some(pipe) = pipeline {
-                let res = pipe.process_audio(audio_samples, &target_lang).await.map_err(|e| e.to_string());
+                let res = pipe.process_audio(audio_samples, &source_lang, &target_lang).await.map_err(|e| e.to_string());
                 match res {
                     Ok(result) => {
                         let mut data = state_clone.lock().await;
                         data.status = AppStatus::Ready;
                         data.last_transcription = Some(result.original_text.clone());
                         data.last_translation = Some(result.translated_text.clone());
+                        data.last_audio = Some(result.audio_output);
+                        data.stt_time = result.stt_time;
+                        data.translation_time = result.translation_time;
+                        data.tts_time = result.tts_time;
                         // Audio playback intentionally removed — no sounds from the app
                     }
                     Err(e_string) => {
@@ -222,6 +233,13 @@ pub fn get_audio_levels() -> Vec<f32> {
 pub async fn get_active_device(app: AppHandle) -> String {
     let state = get_state(&app);
     let data = state.lock().await;
+    
+    if data.hardware_info.has_cuda {
+        if let Some(gpu) = &data.hardware_info.gpu_name {
+            return format!("GPU: {}", gpu);
+        }
+    }
+    
     if let Some(pipe) = &data.pipeline {
         let manager = pipe.model_manager.lock().await;
         manager.get_active_device()
@@ -312,3 +330,40 @@ pub async fn reload_models(app: AppHandle) -> Result<String, String> {
         Err("Pipeline not initialized".to_string())
     }
 }
+#[tauri::command]
+pub async fn get_last_audio(app: AppHandle) -> Result<Vec<u8>, String> {
+    let state = get_state(&app);
+    let data = state.lock().await;
+    match &data.last_audio {
+        Some(audio) if !audio.is_empty() => {
+            let sample_rate: u32 = 24000;
+            let mut buffer = Vec::new();
+            let data_size = audio.len() * 4;
+            let file_size = 36 + data_size as u32;
+
+            buffer.extend_from_slice(b"RIFF");
+            buffer.extend_from_slice(&file_size.to_le_bytes());
+            buffer.extend_from_slice(b"WAVE");
+            
+            buffer.extend_from_slice(b"fmt ");
+            buffer.extend_from_slice(&16u32.to_le_bytes()); 
+            buffer.extend_from_slice(&3u16.to_le_bytes()); // IEEE Float
+            buffer.extend_from_slice(&1u16.to_le_bytes()); // Channels
+            buffer.extend_from_slice(&sample_rate.to_le_bytes()); 
+            buffer.extend_from_slice(&(sample_rate * 4).to_le_bytes()); 
+            buffer.extend_from_slice(&4u16.to_le_bytes()); 
+            buffer.extend_from_slice(&32u16.to_le_bytes()); 
+            
+            buffer.extend_from_slice(b"data");
+            buffer.extend_from_slice(&(data_size as u32).to_le_bytes());
+            
+            for &sample in audio {
+                buffer.extend_from_slice(&sample.to_le_bytes());
+            }
+            
+            Ok(buffer)
+        },
+        _ => Err("No audio available".to_string())
+    }
+}
+

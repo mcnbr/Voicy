@@ -9,9 +9,9 @@
                     "lint":  "eslint .",
                     "preview":  "vite preview",
                     "tauri":  "tauri",
-                    "tauri-dev": "tauri dev",
-                    "tauri-dev-cuda": "cross-env CARGO_FEATURES=cuda tauri dev",
-                    "tauri-build": "tauri build"
+                    "tauri-dev": "tauri dev --features cuda",
+                    "tauri-dev-cuda": "tauri dev --features cuda",
+                    "tauri-build": "tauri build --features cuda"
                 },
     "dependencies":  {
                          "@tauri-apps/api":  "^2.11.0",
