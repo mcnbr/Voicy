@@ -103,6 +103,8 @@ fn compute_rms_bins(data: &[f32], bins: &mut [f32; 32]) {
         return;
     }
     let bin_size = (data.len() / 32).max(1);
+    // Increase sensitivity factor from 1.0 to 3.0 for more visible bars
+    let sensitivity = 3.0;
     for (i, bin) in bins.iter_mut().enumerate() {
         let start = i * bin_size;
         let end = ((i + 1) * bin_size).min(data.len());
@@ -110,9 +112,9 @@ fn compute_rms_bins(data: &[f32], bins: &mut [f32; 32]) {
             *bin = 0.0;
             continue;
         }
-        let rms = (data[start..end].iter().map(|s| s * s).sum::<f32>() / (end - start) as f32).sqrt();
-        // Smooth towards new value
-        *bin = *bin * 0.7 + rms * 0.3;
+        let rms = (data[start..end].iter().map(|s| s * s).sum::<f32>() / (end - start) as f32).sqrt() * sensitivity;
+        // Smooth towards new value with faster response
+        *bin = (*bin * 0.5 + rms * 0.5).min(1.0);
     }
 }
 

@@ -3,6 +3,7 @@ use log::{info, warn};
 use std::sync::Mutex;
 use std::fs;
 use std::io::Write;
+use regex::Regex;
 
 #[cfg(feature = "cuda")]
 use omnivoice_infer::pipeline::Phase3Pipeline;
@@ -88,7 +89,7 @@ impl TtsModel {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn synthesize(&self, text: &str, ref_audio: Option<Vec<f32>>) -> Result<Vec<f32>> {
+    pub fn synthesize(&self, text: &str, ref_audio: Option<Vec<f32>>, ref_text: Option<&str>) -> Result<Vec<f32>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -101,7 +102,10 @@ impl TtsModel {
             return Ok(self.generate_placeholder_audio(num_samples));
         }
 
-        info!("Synthesizing {} chars via OmniVoice...", text.len());
+        // Convert numbers to words for better TTS
+        let text_with_words = Self::numbers_to_words(text);
+
+        info!("Synthesizing {} chars via OmniVoice...", text_with_words.len());
 
         let ref_audio_path = if let Some(ref_samples) = ref_audio {
             if ref_samples.len() > 16000 {
@@ -119,10 +123,15 @@ impl TtsModel {
 
         let req = if let Some(ref_path) = ref_audio_path {
             info!("Using voice cloning with ref audio: {}", ref_path);
-            GenerationRequest::new_text_only(text)
-                .with_ref_audio(ReferenceAudioInput::from_path(ref_path))
+            let mut req = GenerationRequest::new_text_only(text_with_words.as_str())
+                .with_ref_audio(ReferenceAudioInput::from_path(ref_path));
+            if let Some(rt) = ref_text {
+                req = req.with_ref_text(rt);
+                info!("Using ref_text for better voice cloning: {}", rt);
+            }
+            req
         } else {
-            GenerationRequest::new_text_only(text)
+            GenerationRequest::new_text_only(text_with_words.as_str())
         };
 
         let mut pipeline_lock = self.pipeline.lock().unwrap();
@@ -140,10 +149,85 @@ impl TtsModel {
             }
         }
 
-        let word_count = text.split_whitespace().count();
+        let word_count = text_with_words.split_whitespace().count();
         let duration_secs = (word_count as f32 * 0.15).max(1.0);
         let num_samples = (self.sample_rate as f32 * duration_secs) as usize;
         Ok(self.generate_placeholder_audio(num_samples))
+    }
+
+    pub fn numbers_to_words(text: &str) -> String {
+        let re = Regex::new(r"\d+").unwrap();
+        let mut result = text.to_string();
+        
+        for cap in re.find_iter(text) {
+            if let Ok(num) = cap.as_str().parse::<u64>() {
+                let words = Self::number_to_words_english(num);
+                result = result.replace(cap.as_str(), &words);
+            }
+        }
+        result
+    }
+
+    pub fn number_to_words_english(n: u64) -> String {
+        if n == 0 {
+            return "zero".to_string();
+        }
+        
+        let units = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+        let teens = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+        let tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+        
+        fn write(n: u64, units: &[&str], teens: &[&str], tens: &[&str]) -> String {
+            if n == 0 {
+                String::new()
+            } else if n < 10 {
+                units[n as usize].to_string()
+            } else if n < 20 {
+                teens[(n - 10) as usize].to_string()
+            } else if n < 100 {
+                let ten = (n / 10) as usize;
+                let unit = (n % 10) as usize;
+                if unit == 0 {
+                    tens[ten].to_string()
+                } else {
+                    format!("{}-{}", tens[ten], units[unit])
+                }
+            } else if n < 1000 {
+                let hundred = n / 100;
+                let remainder = n % 100;
+                if remainder == 0 {
+                    format!("{} hundred", units[hundred as usize])
+                } else {
+                    format!("{} hundred {}", units[hundred as usize], write(remainder, units, teens, tens))
+                }
+            } else if n < 1_000_000 {
+                let thousand = n / 1000;
+                let remainder = n % 1000;
+                if remainder == 0 {
+                    format!("{} thousand", write(thousand, units, teens, tens))
+                } else {
+                    format!("{} thousand {}", write(thousand, units, teens, tens), write(remainder, units, teens, tens))
+                }
+            } else if n < 1_000_000_000 {
+                let million = n / 1_000_000;
+                let remainder = n % 1_000_000;
+                if remainder == 0 {
+                    format!("{} million", write(million, units, teens, tens))
+                } else {
+                    format!("{} million {}", write(million, units, teens, tens), write(remainder, units, teens, tens))
+                }
+            } else {
+                let billion = n / 1_000_000_000;
+                let remainder = n % 1_000_000_000;
+                if remainder == 0 {
+                    format!("{} billion", write(billion, units, teens, tens))
+                } else {
+                    format!("{} billion {}", write(billion, units, teens, tens), write(remainder, units, teens, tens))
+                }
+            }
+        }
+        
+        write(n, &units, &teens, &tens)
     }
 
     #[cfg(feature = "cuda")]
@@ -185,7 +269,7 @@ impl TtsModel {
     }
 
     #[cfg(not(feature = "cuda"))]
-    pub fn synthesize(&self, text: &str, _ref_audio: Option<Vec<f32>>) -> Result<Vec<f32>> {
+    pub fn synthesize(&self, text: &str, _ref_audio: Option<Vec<f32>>, _ref_text: Option<&str>) -> Result<Vec<f32>> {
         let word_count = text.split_whitespace().count();
         let duration_secs = (word_count as f32 * 0.15).max(1.0);
         let num_samples = (self.sample_rate as f32 * duration_secs) as usize;

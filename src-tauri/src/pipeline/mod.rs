@@ -39,10 +39,11 @@ impl Pipeline {
         let stt_time = start.elapsed().as_millis() as u32;
 
         let start = std::time::Instant::now();
-        let translation = if transcription.trim().is_empty() {
+        let transcription_with_numbers = crate::models::tts::TtsModel::numbers_to_words(&transcription);
+        let translation = if transcription_with_numbers.trim().is_empty() {
             String::new()
         } else if let Some(translator) = manager.get_translator() {
-            translator.translate(&transcription, source_lang, target_lang)?
+            translator.translate(&transcription_with_numbers, source_lang, target_lang)?
         } else {
             "No translator model loaded".to_string()
         };
@@ -52,7 +53,8 @@ impl Pipeline {
 
         let start = std::time::Instant::now();
         let audio_output = if let Some(tts) = manager.get_tts() {
-            tts.synthesize(&translation, ref_audio)?
+            // Pass original transcription for better voice cloning
+            tts.synthesize(&translation, ref_audio, Some(&transcription))?
         } else {
             Vec::new()
         };

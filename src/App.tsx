@@ -3,12 +3,42 @@ import { invoke } from '@tauri-apps/api/core';
 import { useWebSocket } from './hooks/useWebSocket';
 
 function App() {
-  const [outputMode, setOutputMode] = useState('auto');
+  const [outputMode, setOutputMode] = useState(() => {
+    const saved = localStorage.getItem('voicy_settings');
+    if (saved) {
+      try { return JSON.parse(saved).routing_mode || 'auto'; } catch { return 'auto'; }
+    }
+    return 'auto';
+  });
   const [isApplying, setIsApplying] = useState(false);
-  const [selectedInput, setSelectedInput] = useState<number | null>(null);
-  const [selectedOutput, setSelectedOutput] = useState<number | null>(null);
-  const [sourceLang, setSourceLang] = useState('en');
-  const [targetLang, setTargetLang] = useState('en');
+  const [selectedInput, setSelectedInput] = useState<number | null>(() => {
+    const saved = localStorage.getItem('voicy_settings');
+    if (saved) {
+      try { return JSON.parse(saved).input_device ?? null; } catch { return null; }
+    }
+    return null;
+  });
+  const [selectedOutput, setSelectedOutput] = useState<number | null>(() => {
+    const saved = localStorage.getItem('voicy_settings');
+    if (saved) {
+      try { return JSON.parse(saved).output_device ?? null; } catch { return null; }
+    }
+    return null;
+  });
+  const [sourceLang, setSourceLang] = useState(() => {
+    const saved = localStorage.getItem('voicy_settings');
+    if (saved) {
+      try { return JSON.parse(saved).source_lang || 'en'; } catch { return 'en'; }
+    }
+    return 'en';
+  });
+  const [targetLang, setTargetLang] = useState(() => {
+    const saved = localStorage.getItem('voicy_settings');
+    if (saved) {
+      try { return JSON.parse(saved).target_lang || 'en'; } catch { return 'en'; }
+    }
+    return 'en';
+  });
   const [modePresets, setModePresets] = useState<Record<string, any>>(() => {
     try {
       const saved = localStorage.getItem('voicy_mode_presets');
@@ -92,7 +122,7 @@ function App() {
     if (config) {
       setSelectedInput(config.input_device);
       setSelectedOutput(config.output_device);
-      setSourceLang(config.source_lang === 'auto' ? 'en' : config.source_lang);
+      setSourceLang(config.source_lang === 'auto' ? 'auto' : config.source_lang);
       setTargetLang(config.target_lang);
       setOutputMode(config.routing_mode);
       if (config.live_threshold !== undefined) setLiveThresholdDb(rmsToDb(config.live_threshold));
@@ -213,6 +243,7 @@ function App() {
 
   // Track audio by unique ID to prevent re-triggering
   const lastAudioIdRef = useRef<string>('');
+  const autoPlayAttemptedRef = useRef<string>('');
 
   // Fetch last generated audio as blob URL when translation is done
   useEffect(() => {
@@ -220,27 +251,63 @@ function App() {
       const audioId = `${lastTranslation.text}-${ttsTime.duration_ms}`;
       if (audioId !== lastAudioIdRef.current) {
         lastAudioIdRef.current = audioId;
+        autoPlayAttemptedRef.current = '';
+        // Revoke previous URL first
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
+        setAudioUrl(null);
+        setIsAudioPlaying(false);
+        
         invoke<number[]>('get_last_audio')
           .then(bytes => {
             const blob = new Blob([new Uint8Array(bytes)], { type: 'audio/wav' });
             const url = URL.createObjectURL(blob);
             setAudioUrl(url);
-            // Auto-play in auto mode
-            if (outputMode === 'auto' && hiddenAudioRef.current) {
-              hiddenAudioRef.current.play().catch(() => {});
-            }
           })
           .catch(() => setAudioUrl(null));
       }
     }
-  }, [lastTranslation, ttsTime, outputMode]);
+  }, [lastTranslation, ttsTime]);
 
-  // Cleanup blob URL when it changes or on unmount
+  // Reset player when starting new recording
+  useEffect(() => {
+    if (isRecording) {
+      // Reset all audio state
+      setIsAudioPlaying(false);
+      lastAudioIdRef.current = '';
+      autoPlayAttemptedRef.current = '';
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+        setAudioUrl(null);
+      }
+      if (hiddenAudioRef.current) {
+        hiddenAudioRef.current.pause();
+        hiddenAudioRef.current.load(); // Force reload to clear any buffered audio
+        hiddenAudioRef.current.currentTime = 0;
+      }
+    }
+  }, [isRecording, audioUrl]);
+
+  // Auto-play when audioUrl changes and in auto mode
+  useEffect(() => {
+    if (audioUrl && outputMode === 'auto' && hiddenAudioRef.current) {
+      const audioId = lastAudioIdRef.current;
+      if (audioId && audioId !== autoPlayAttemptedRef.current) {
+        autoPlayAttemptedRef.current = audioId;
+        setIsAudioPlaying(false);
+        hiddenAudioRef.current.currentTime = 0;
+        hiddenAudioRef.current.play().then(() => {
+          setIsAudioPlaying(true);
+        }).catch(() => {});
+      }
+    }
+  }, [audioUrl, outputMode]);
+
+  // Cleanup blob URL when component unmounts only
   useEffect(() => {
     return () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
     };
-  }, [audioUrl]);
+  }, []);
 
   const savePreset = useCallback((mode: string) => {
     const preset = {
@@ -267,6 +334,14 @@ function App() {
   const handleApply = useCallback(async () => {
     setIsApplying(true);
     savePreset(outputMode);
+    const settings = {
+      input_device: selectedInput,
+      output_device: selectedOutput,
+      source_lang: sourceLang,
+      target_lang: targetLang,
+      routing_mode: outputMode,
+    };
+    localStorage.setItem('voicy_settings', JSON.stringify(settings));
     updateConfig({
       input_device: selectedInput,
       output_device: selectedOutput,
@@ -290,10 +365,18 @@ function App() {
     if (!hiddenAudioRef.current || !audioUrl) return;
     if (isAudioPlaying) {
       hiddenAudioRef.current.pause();
+      hiddenAudioRef.current.currentTime = 0;
     } else {
       hiddenAudioRef.current.play();
     }
   }, [isAudioPlaying, audioUrl]);
+
+  const handleAudioEnded = useCallback(() => {
+    setIsAudioPlaying(false);
+    if (hiddenAudioRef.current) {
+      hiddenAudioRef.current.currentTime = 0;
+    }
+  }, []);
 
   const handleSeek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!hiddenAudioRef.current || !audioDuration) return;
@@ -375,12 +458,19 @@ function App() {
              </div>
            )}
 
-           <button
-              className={`action-btn ${isRecording ? 'recording' : ''}`}
-              onClick={() => toggleRecording()}
-              style={{ marginBottom: '12px', width: '100%' }}
-              disabled={!isConnected || modelsLoading}
-           >
+<button
+               className={`action-btn ${isRecording ? 'recording' : ''}`}
+               onClick={() => {
+                 if (!isRecording && hiddenAudioRef.current) {
+                   hiddenAudioRef.current.pause();
+                   hiddenAudioRef.current.currentTime = 0;
+                   setIsAudioPlaying(false);
+                 }
+                 toggleRecording();
+               }}
+               style={{ marginBottom: '12px', width: '100%' }}
+               disabled={!isConnected || modelsLoading}
+            >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
@@ -420,7 +510,8 @@ function App() {
               <label style={{ minWidth: '70px' }}>Source</label>
               <select className="select-dropdown" style={{ flex: 1 }}
                 value={sourceLang} onChange={e => setSourceLang(e.target.value)}>
-               {Object.entries(supportedLanguages).filter(([code]) => code !== 'auto').map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+                <option key="auto" value="auto">Auto Detect</option>
+               {Object.entries(supportedLanguages).map(([code, name]) => <option key={code} value={code}>{name}</option>)}
               </select>
             </div>
             
@@ -537,15 +628,15 @@ function App() {
                      width: '100%'
                    }}>
                      {audioUrl && (
-                       <audio
-                         ref={hiddenAudioRef}
-                         src={audioUrl}
-                         style={{ display: 'none' }}
-                         onPlay={() => setIsAudioPlaying(true)}
-                         onPause={() => setIsAudioPlaying(false)}
-                         onEnded={() => setIsAudioPlaying(false)}
-                         onLoadedMetadata={(e) => setAudioDuration(e.currentTarget.duration)}
-                       />
+<audio
+                          ref={hiddenAudioRef}
+                          src={audioUrl}
+                          style={{ display: 'none' }}
+                          onPlay={() => setIsAudioPlaying(true)}
+                          onPause={() => { setIsAudioPlaying(false); if (hiddenAudioRef.current) hiddenAudioRef.current.currentTime = 0; }}
+                          onEnded={handleAudioEnded}
+                          onLoadedMetadata={(e) => setAudioDuration(e.currentTarget.duration)}
+                        />
                      )}
                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
                         <button

@@ -99,14 +99,20 @@ export function useWebSocket(): UseWebSocketReturn {
   const [config, setConfig] = useState<ConfigData | null>(null);
 
   useEffect(() => {
-    // Load config and devices initially
+    // Load config and devices initially - prioritize localStorage
+    const savedSettings = localStorage.getItem('voicy_settings');
+    let savedConfig: any = {};
+    if (savedSettings) {
+      try { savedConfig = JSON.parse(savedSettings); } catch {}
+    }
+    
     invoke("get_config").then((cfg: any) => {
       setConfig({
-        input_device: null,
-        output_device: null,
-        source_lang: "auto",
-        target_lang: "en",
-        routing_mode: cfg.mode || "auto",
+        input_device: savedConfig.input_device ?? null,
+        output_device: savedConfig.output_device ?? null,
+        source_lang: savedConfig.source_lang || "auto",
+        target_lang: savedConfig.target_lang || "en",
+        routing_mode: savedConfig.routing_mode || cfg.mode || "auto",
         ref_audio_path: null,
         supported_languages: {
             "en": "English", "pt": "Portuguese", "es": "Spanish"
